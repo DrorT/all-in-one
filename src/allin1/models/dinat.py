@@ -5,7 +5,8 @@
 
 import math
 import torch
-from abc import ABC,  abstractmethod
+import torch.nn.functional as F
+from abc import ABC, abstractmethod
 from typing import Optional, Tuple, Callable
 from natten.functional import na1d, na2d
 from ..config import Config
@@ -79,6 +80,7 @@ class _NeighborhoodAttentionNd(ABC, nn.Module):
     self.value = nn.Linear(self.all_head_size, self.all_head_size, bias=cfg.qkv_bias)
     
     self.dropout = nn.Dropout(cfg.drop_attention)
+    self._natten_backend_available = True
   
   def forward(
     self,
@@ -94,39 +96,148 @@ class _NeighborhoodAttentionNd(ABC, nn.Module):
     # It gives identical results because scalars are commutable in matrix multiplication.
     query_layer = query_layer / math.sqrt(self.attention_head_size)
     
-    # Compute NA using the new NATTEN API.
-    # The nattendav function now points to na1d or na2d, which handle the entire attention operation.
-    # Relative positional bias (rpb) is passed directly.
-    # Dropout on attention probabilities is handled by attn_drop.
-    # Scale is 1.0 because query_layer is already scaled.
-    context_layer = self.nattendav(
-        query_layer, 
-        key_layer, 
-        value_layer, 
-        kernel_size=self.kernel_size, 
-        dilation=self.dilation, 
-        scale=1.0, 
-        bias=self.rpb, 
-        attn_drop=self.dropout.p if self.training else 0.0
-    )
-    if len(context_layer.shape) > 4:  # 2D
-      context_layer = context_layer.permute(0, 2, 3, 1, 4).contiguous()
-    else:  # 1D
-      context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+    attention_probs = None
+    context_layer = None
+
+    if self._natten_backend_available:
+      try:
+        context_layer = self.nattendav(
+          query_layer,
+          key_layer,
+          value_layer,
+          kernel_size=self.kernel_size,
+          dilation=self.dilation,
+          scale=1.0,
+        )
+        if self.dropout.p > 0:
+          context_layer = F.dropout(context_layer, p=self.dropout.p, training=self.training)
+      except NotImplementedError:
+        self._natten_backend_available = False
+      except RuntimeError as err:
+        if "NATTEN could not find a suitable backend" in str(err):
+          self._natten_backend_available = False
+        else:
+          raise
+
+    if context_layer is None:
+      context_layer, attention_probs = self._torch_neighborhood_attention(query_layer, key_layer, value_layer)
+    else:
+      context_layer = context_layer.contiguous()
     new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
-    context_layer = context_layer.view(new_context_layer_shape)
-    
+    context_layer = context_layer.reshape(new_context_layer_shape)
+
     outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
-    
+
     return outputs
   
   def transpose_for_scores(self, x):
     new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
     x = x.view(new_x_shape)
-    if len(x.shape) > 4:  # 2D
-      return x.permute(0, 3, 1, 2, 4)
-    else:  # 1D
-      return x.permute(0, 2, 1, 3)
+    return x
+
+  def _torch_neighborhood_attention(
+    self,
+    query_layer: torch.Tensor,
+    key_layer: torch.Tensor,
+    value_layer: torch.Tensor,
+  ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    if query_layer.dim() == 4:
+      return self._torch_neighborhood_attention_1d(query_layer, key_layer, value_layer)
+    return self._torch_neighborhood_attention_2d(query_layer, key_layer, value_layer)
+
+  def _torch_neighborhood_attention_1d(
+    self,
+    query_layer: torch.Tensor,
+    key_layer: torch.Tensor,
+    value_layer: torch.Tensor,
+  ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    # Shapes: (B, T, H, D)
+    B, T, H, D = query_layer.shape
+    window = 2 * self.kernel_size - 1
+    radius = self.kernel_size - 1
+    pad = radius * self.dilation
+
+    query = query_layer.permute(0, 2, 1, 3)  # (B, H, T, D)
+    key = key_layer.permute(0, 2, 1, 3).reshape(B * H, T, D).permute(0, 2, 1).unsqueeze(2)  # (B*H, D, 1, T)
+    value = value_layer.permute(0, 2, 1, 3).reshape(B * H, T, D).permute(0, 2, 1).unsqueeze(2)
+
+    key_windows = F.unfold(
+      key,
+      kernel_size=(1, window),
+      dilation=(1, self.dilation),
+      padding=(0, pad),
+    )  # (B*H, D * window, T)
+    value_windows = F.unfold(
+      value,
+      kernel_size=(1, window),
+      dilation=(1, self.dilation),
+      padding=(0, pad),
+    )
+
+    key_windows = key_windows.view(B, H, D, window, T).permute(0, 1, 4, 3, 2)  # (B, H, T, window, D)
+    value_windows = value_windows.view(B, H, D, window, T).permute(0, 1, 4, 3, 2)
+
+    attn_scores = (query.unsqueeze(3) * key_windows).sum(dim=-1)  # (B, H, T, window)
+    rpb = self.rpb.view(1, H, 1, window)
+    attn_scores = attn_scores + rpb
+
+    attn_probs = torch.softmax(attn_scores, dim=-1)
+    if self.dropout.p > 0:
+      attn_probs = F.dropout(attn_probs, p=self.dropout.p, training=self.training)
+
+    context = (attn_probs.unsqueeze(-1) * value_windows).sum(dim=3)  # (B, H, T, D)
+    context = context.permute(0, 2, 1, 3)  # (B, T, H, D)
+
+    return context, attn_probs
+
+  def _torch_neighborhood_attention_2d(
+    self,
+    query_layer: torch.Tensor,
+    key_layer: torch.Tensor,
+    value_layer: torch.Tensor,
+  ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    # Shapes: (B, Hgt, W, H, D)
+    B, Hgt, W, H, D = query_layer.shape
+    window = 2 * self.kernel_size - 1
+    radius = self.kernel_size - 1
+    pad = radius * self.dilation
+
+    query = query_layer.permute(0, 3, 1, 2, 4)  # (B, H, Hgt, W, D)
+    key = key_layer.permute(0, 3, 1, 2, 4)
+    value = value_layer.permute(0, 3, 1, 2, 4)
+
+    BH = B * H
+    key_reshaped = key.reshape(BH, Hgt, W, D).permute(0, 3, 1, 2)  # (BH, D, Hgt, W)
+    value_reshaped = value.reshape(BH, Hgt, W, D).permute(0, 3, 1, 2)
+
+    key_windows = F.unfold(
+      key_reshaped,
+      kernel_size=(window, window),
+      dilation=self.dilation,
+      padding=pad,
+    )  # (BH, D * window^2, Hgt * W)
+    value_windows = F.unfold(
+      value_reshaped,
+      kernel_size=(window, window),
+      dilation=self.dilation,
+      padding=pad,
+    )
+
+    key_windows = key_windows.view(B, H, D, window * window, Hgt, W).permute(0, 1, 4, 5, 3, 2)
+    value_windows = value_windows.view(B, H, D, window * window, Hgt, W).permute(0, 1, 4, 5, 3, 2)
+
+    attn_scores = (query.unsqueeze(-2) * key_windows).sum(dim=-1)  # (B, H, Hgt, W, window^2)
+    rpb = self.rpb.view(1, H, 1, 1, window * window)
+    attn_scores = attn_scores + rpb
+
+    attn_probs = torch.softmax(attn_scores, dim=-1)
+    if self.dropout.p > 0:
+      attn_probs = F.dropout(attn_probs, p=self.dropout.p, training=self.training)
+
+    context = (attn_probs.unsqueeze(-1) * value_windows).sum(dim=-2)  # (B, H, Hgt, W, D)
+    context = context.permute(0, 2, 3, 1, 4)  # (B, Hgt, W, H, D)
+
+    return context, attn_probs
 
 
 class NeighborhoodAttention1d(_NeighborhoodAttentionNd):

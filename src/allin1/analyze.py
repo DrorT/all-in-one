@@ -87,6 +87,10 @@ def analyze(
   demix_dir = mkpath(demix_dir)
   spec_dir = mkpath(spec_dir)
 
+  # Initialize paths for byproducts
+  demix_paths = []
+  spec_paths = []
+
   # Check if the results are already computed.
   if out_dir is None or overwrite:
     todo_paths = paths

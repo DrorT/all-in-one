@@ -131,3 +131,8 @@ def _to_summary(record: JobRecord) -> JobSummary:
     structure_ready=record.stored.has_structure,
     error=record.error,
   )
+
+
+app = create_app()
+
+__all__ = ["create_app", "app"]

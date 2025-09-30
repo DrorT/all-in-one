@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from pathlib import Path
 from typing import Dict
 
@@ -31,6 +32,25 @@ class DemucsSeparator:
       await self.preload()
 
     return await asyncio.to_thread(self._separate_sync, audio_path, output_dir)
+
+  def is_loaded(self) -> bool:
+    return self._model is not None
+
+  def release(self):
+    if self._model is None:
+      return
+    model = self._model
+    self._model = None
+    self.sample_rate = None
+    try:
+      if hasattr(model, 'to'):
+        model.to('cpu')
+    except Exception:  # pylint: disable=broad-except
+      pass
+    if torch.cuda.is_available():
+      with contextlib.suppress(Exception):
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
 
   def _separate_sync(self, audio_path: Path, output_dir: Path) -> Dict[str, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)

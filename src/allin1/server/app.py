@@ -92,22 +92,29 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
     record = await job_manager.get_job(job_id)
     if record is None:
       raise HTTPException(status_code=404, detail='Job not found')
-    if record.result is None:
+    result = await job_manager.load_structure_result(record)
+    if result is None:
       raise HTTPException(status_code=202, detail='Structure not ready')
-    return JSONResponse(record.result)
+    return JSONResponse(result)
 
   @app.get('/jobs/{job_id}/stems')
   async def fetch_stems(job_id: str, job_manager: AnalysisJobManager = Depends(get_manager)):
     record = await job_manager.get_job(job_id)
     if record is None:
       raise HTTPException(status_code=404, detail='Job not found')
-    if not record.stems_path or not record.stems_path.exists():
+    stems_path = await job_manager.ensure_stems_archive(record)
+    if stems_path is None:
       raise HTTPException(status_code=202, detail='Stems not ready')
     return FileResponse(
-      path=record.stems_path,
+      path=stems_path,
       media_type='application/zip',
       filename=f'{job_id}_stems.zip',
     )
+
+  if settings.health_metrics_enabled:
+    @app.get('/health/metrics')
+    async def health_metrics(job_manager: AnalysisJobManager = Depends(get_manager)):
+      return JSONResponse(job_manager.get_metrics())
 
   return app
 
@@ -120,7 +127,7 @@ def _to_summary(record: JobRecord) -> JobSummary:
     content_hash=record.content_hash,
     segment_start=record.metadata.segment_start,
     segment_end=record.metadata.segment_end,
-  stems_ready=record.stems_path is not None,
-    structure_ready=record.result is not None,
+    stems_ready=record.stored.has_stems,
+    structure_ready=record.stored.has_structure,
     error=record.error,
   )

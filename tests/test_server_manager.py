@@ -1,14 +1,16 @@
 import asyncio
+import hashlib
 from pathlib import Path
 
 import pytest
 
 from allin1.server import job_manager
-from allin1.server.config import ProcessingMode, ServerSettings
+from allin1.server.config import ServerSettings, StorageEvictionMode
+from allin1.server.storage import metadata_path, stems_zip_path
 
 
 @pytest.mark.asyncio
-async def test_job_manager_caching(monkeypatch):
+async def test_job_manager_disk_persistence(monkeypatch, tmp_path):
   async def dummy_validate(self, path: Path):
     return None
 
@@ -31,6 +33,9 @@ async def test_job_manager_caching(monkeypatch):
         stem_path.write_bytes(f'fake-{name}'.encode())
         mapping[name] = stem_path
       return mapping
+
+    def release(self):
+      return None
 
   monkeypatch.setattr(job_manager, 'DemucsSeparator', DummySeparator)
 
@@ -59,32 +64,45 @@ async def test_job_manager_caching(monkeypatch):
   monkeypatch.setattr(job_manager, 'run_inference', fake_run_inference)
   monkeypatch.setattr(job_manager, 'load_pretrained_model', lambda *args, **kwargs: object())
 
-  settings = ServerSettings(processing_mode=ProcessingMode.SEQUENTIAL, cache_size=2, device='cpu')
+  storage_root = tmp_path / 'storage'
+  settings = ServerSettings(
+    device='cpu',
+    storage_root=storage_root,
+    preload_demucs=False,
+    health_metrics_enabled=False,
+  )
   manager = job_manager.AnalysisJobManager(settings)
   await manager.startup()
 
   metadata = job_manager.JobMetadata(user_hash='track-a', filename='clip.wav')
   record_one = await manager.submit(b'audio-bytes', metadata)
   await _wait_for_status(manager, record_one.job_id, job_manager.JobStatus.COMPLETED)
-  assert record_one.result is not None
-  assert record_one.stems_path is not None
+  assert record_one.status == job_manager.JobStatus.COMPLETED
 
+  stems_path = await manager.ensure_stems_archive(record_one)
+  assert stems_path is not None and stems_path.exists()
+  result_payload = await manager.load_structure_result(record_one)
+  assert result_payload is not None
+
+  # Submitting identical audio should reuse the existing job artifacts.
   record_cached = await manager.submit(b'audio-bytes', metadata)
+  assert record_cached.job_id == record_one.job_id
   assert record_cached.status == job_manager.JobStatus.COMPLETED
-  assert record_cached.result == record_one.result
-  assert record_cached.stems_path is not None
-  assert record_cached.stems_path.exists()
-  assert record_cached.stems_path != record_one.stems_path
+  cached_stems = await manager.ensure_stems_archive(record_cached)
+  assert cached_stems == stems_path
+  cached_result = await manager.load_structure_result(record_cached)
+  assert cached_result == result_payload
 
-  cache_paths = [entry.stems_path for entry in manager._cache.values()]
-  assert all(path.parent == manager._cache_dir for path in cache_paths)
+  content_hash = hashlib.sha256(b'audio-bytes').hexdigest()
+  metadata_file = metadata_path(storage_root, content_hash)
+  assert metadata_file.exists()
+  assert stems_zip_path(storage_root, content_hash).exists()
 
   await manager.shutdown()
-  assert not manager._cache_dir.exists()
 
 
 @pytest.mark.asyncio
-async def test_structure_inference_cpu_fallback(monkeypatch):
+async def test_structure_inference_cpu_fallback(monkeypatch, tmp_path):
   async def dummy_validate(self, path: Path):
     return None
 
@@ -112,6 +130,9 @@ async def test_structure_inference_cpu_fallback(monkeypatch):
         stem_path.write_bytes(f'fake-{name}'.encode())
         mapping[name] = stem_path
       return mapping
+
+    def release(self):
+      return None
 
   monkeypatch.setattr(job_manager, 'DemucsSeparator', DummySeparator)
 
@@ -155,7 +176,13 @@ async def test_structure_inference_cpu_fallback(monkeypatch):
 
   monkeypatch.setattr(job_manager, 'load_pretrained_model', lambda *args, **kwargs: DummyModel())
 
-  settings = ServerSettings(processing_mode=ProcessingMode.SEQUENTIAL, cache_size=1, device='cuda')
+  storage_root = tmp_path / 'storage'
+  settings = ServerSettings(
+    device='cuda',
+    storage_root=storage_root,
+    preload_demucs=False,
+    health_metrics_enabled=False,
+  )
   manager = job_manager.AnalysisJobManager(settings)
   await manager.startup()
 
@@ -170,7 +197,84 @@ async def test_structure_inference_cpu_fallback(monkeypatch):
   await manager.shutdown()
 
 
-async def _wait_for_status(manager, job_id: str, status: job_manager.JobStatus, timeout: float = 2.0):
+@pytest.mark.asyncio
+async def test_storage_eviction_cancels_oldest(monkeypatch, tmp_path):
+  async def dummy_validate(self, path: Path):
+    return None
+
+  monkeypatch.setattr(job_manager.AnalysisJobManager, '_validate_duration', dummy_validate, raising=False)
+
+  class DummySeparator:
+    sample_rate = 44100
+
+    def __init__(self, *args, **kwargs):
+      pass
+
+    async def preload(self):
+      return None
+
+    async def separate_to_directory(self, input_path: Path, output_dir: Path):
+      output_dir.mkdir(parents=True, exist_ok=True)
+      mapping = {}
+      for name in job_manager.STEM_ORDER:
+        stem_path = output_dir / f'{name}.wav'
+        stem_path.write_bytes(f'fake-{name}'.encode())
+        mapping[name] = stem_path
+      return mapping
+
+    def release(self):
+      return None
+
+  monkeypatch.setattr(job_manager, 'DemucsSeparator', DummySeparator)
+
+  def fake_extract(demix_paths, spec_dir, multiprocess):
+    spec_dir.mkdir(parents=True, exist_ok=True)
+    spec_path = spec_dir / 'spec.npy'
+    spec_path.write_bytes(b'spec')
+    return [spec_path]
+
+  monkeypatch.setattr(job_manager, 'extract_spectrograms', fake_extract)
+
+  from allin1.typings import AnalysisResult, Segment
+
+  def fake_run_inference(path, spec_path, model, device, include_activations, include_embeddings):
+    return AnalysisResult(
+      path=Path(path),
+      bpm=120,
+      beats=[0.0],
+      downbeats=[0.0],
+      beat_positions=[0],
+      segments=[Segment(start=0.0, end=1.0, label='intro')],
+      activations=None,
+      embeddings=None,
+    )
+
+  monkeypatch.setattr(job_manager, 'run_inference', fake_run_inference)
+  monkeypatch.setattr(job_manager, 'load_pretrained_model', lambda *args, **kwargs: object())
+
+  storage_root = tmp_path / 'storage'
+  settings = ServerSettings(
+    device='cpu',
+    storage_root=storage_root,
+    preload_demucs=False,
+    health_metrics_enabled=False,
+    storage_eviction_mode=StorageEvictionMode.EVICT_OLDEST,
+    max_storage_bytes=2560,
+  )
+  manager = job_manager.AnalysisJobManager(settings)
+  await manager.startup()
+
+  record_one = await manager.submit(b'audio-one', job_manager.JobMetadata(user_hash='track-1', filename='clip1.wav'))
+  await _wait_for_status(manager, record_one.job_id, job_manager.JobStatus.COMPLETED, timeout=10.0)
+
+  record_two = await manager.submit(b'a' * 400, job_manager.JobMetadata(user_hash='track-2', filename='clip2.wav'))
+  await _wait_for_status(manager, record_two.job_id, job_manager.JobStatus.COMPLETED)
+  await _wait_for_status(manager, record_one.job_id, job_manager.JobStatus.CANCELLED)
+
+  await manager.shutdown()
+
+
+async def _wait_for_status(manager, job_id: str, status: job_manager.JobStatus, timeout: float = 5.0):
   deadline = asyncio.get_event_loop().time() + timeout
   while asyncio.get_event_loop().time() < deadline:
     record = await manager.get_job(job_id)

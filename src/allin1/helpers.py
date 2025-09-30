@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import numpy as np
 import json
 import torch
@@ -44,16 +46,16 @@ def run_inference(
     result.activations = activations
 
   if include_embeddings:
-    result.embeddings = logits.embeddings[0].cpu().numpy()
+    result.embeddings = logits.embeddings[0].detach().cpu().numpy()
 
   return result
 
 
 def compute_activations(logits: AllInOneOutput):
-  activations_beat = torch.sigmoid(logits.logits_beat[0]).cpu().numpy()
-  activations_downbeat = torch.sigmoid(logits.logits_downbeat[0]).cpu().numpy()
-  activations_segment = torch.sigmoid(logits.logits_section[0]).cpu().numpy()
-  activations_label = torch.softmax(logits.logits_function[0], dim=0).cpu().numpy()
+  activations_beat = torch.sigmoid(logits.logits_beat[0]).detach().cpu().numpy()
+  activations_downbeat = torch.sigmoid(logits.logits_downbeat[0]).detach().cpu().numpy()
+  activations_segment = torch.sigmoid(logits.logits_section[0]).detach().cpu().numpy()
+  activations_label = torch.softmax(logits.logits_function[0], dim=0).detach().cpu().numpy()
   return {
     'beat': activations_beat,
     'downbeat': activations_downbeat,

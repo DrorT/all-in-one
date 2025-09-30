@@ -9,11 +9,11 @@ def postprocess_functional_structure(
   logits: AllInOneOutput,
   cfg: Config,
 ):
-  raw_prob_sections = torch.sigmoid(logits.logits_section[0])
-  raw_prob_functions = torch.softmax(logits.logits_function[0], dim=0)
+  raw_prob_sections = torch.sigmoid(logits.logits_section[0]).detach()
+  raw_prob_functions = torch.softmax(logits.logits_function[0], dim=0).detach()
   prob_sections, _ = local_maxima(raw_prob_sections, filter_size=4 * cfg.min_hops_per_beat + 1)
-  prob_sections = prob_sections.cpu().numpy()
-  prob_functions = raw_prob_functions.cpu().numpy()
+  prob_sections = prob_sections.detach().cpu().numpy()
+  prob_functions = raw_prob_functions.detach().cpu().numpy()
 
   boundary_candidates = peak_picking(
     boundary_activation=prob_sections,

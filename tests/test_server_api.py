@@ -41,9 +41,17 @@ class FakeManager:
       zip_file.writestr('bass.wav', b'bass-bytes')
       zip_file.writestr('drums.wav', b'drums-bytes')
     record.stems_path = temp_zip_path
+    record.stored.mark_stems_ready(sample_rate=44100)
+    record.stored.mark_structure_ready()
     record.result = {'bpm': 120, 'segments': []}
     self.jobs[job_id] = record
     return record
+
+  async def load_structure_result(self, record: job_manager.JobRecord):
+    return record.result
+
+  async def ensure_stems_archive(self, record: job_manager.JobRecord):
+    return record.stems_path
 
 
 @pytest.fixture

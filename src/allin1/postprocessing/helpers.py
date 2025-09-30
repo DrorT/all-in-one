@@ -26,7 +26,7 @@ def event_frames_to_time(
     hop_size = cfg.hop_size
   
   if torch.is_tensor(tensor):
-    tensor = tensor.cpu().numpy()
+    tensor = tensor.detach().cpu().numpy()
   
   original_shape = tensor.shape
   if len(original_shape) == 1:
@@ -150,7 +150,7 @@ def quad_interp(input_tensor: torch.FloatTensor):
   if len(input_tensor.shape) == 2:
     return np.stack([quad_interp(x) for x in input_tensor])
   
-  input_arr = input_tensor.cpu().numpy()
+  input_arr = input_tensor.detach().cpu().numpy()
   arange = np.arange(len(input_arr))
   f = interp1d(arange, input_arr, kind='quadratic')
   output_arr = f(arange)

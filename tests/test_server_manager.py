@@ -49,9 +49,9 @@ async def test_job_manager_disk_persistence(monkeypatch, tmp_path):
 
   from allin1.typings import AnalysisResult, Segment
 
-  def fake_run_inference(path, spec_path, model, device, include_activations, include_embeddings):
+  def fake_structure_inference(self, input_path, spec_path):
     return AnalysisResult(
-      path=Path(path),
+      path=Path(input_path),
       bpm=120,
       beats=[0.0],
       downbeats=[0.0],
@@ -61,7 +61,7 @@ async def test_job_manager_disk_persistence(monkeypatch, tmp_path):
       embeddings=None,
     )
 
-  monkeypatch.setattr(job_manager, 'run_inference', fake_run_inference)
+  monkeypatch.setattr(job_manager.AnalysisJobManager, '_structure_inference_sync', fake_structure_inference, raising=False)
   monkeypatch.setattr(job_manager, 'load_pretrained_model', lambda *args, **kwargs: object())
 
   storage_root = tmp_path / 'storage'
@@ -148,13 +148,13 @@ async def test_structure_inference_cpu_fallback(monkeypatch, tmp_path):
 
   calls = {'count': 0, 'devices': []}
 
-  def flaky_run_inference(path, spec_path, model, device, include_activations, include_embeddings):
+  def flaky_structure_inference(self, input_path, spec_path):
     calls['count'] += 1
-    calls['devices'].append(device)
+    calls['devices'].append(self.analysis_device)
     if calls['count'] == 1:
       raise RuntimeError('CUDA out of memory. Tried to allocate...')
     return AnalysisResult(
-      path=Path(path),
+      path=Path(input_path),
       bpm=120,
       beats=[0.0],
       downbeats=[0.0],
@@ -164,7 +164,7 @@ async def test_structure_inference_cpu_fallback(monkeypatch, tmp_path):
       embeddings=None,
     )
 
-  monkeypatch.setattr(job_manager, 'run_inference', flaky_run_inference)
+  monkeypatch.setattr(job_manager.AnalysisJobManager, '_structure_inference_sync', flaky_structure_inference, raising=False)
 
   class DummyModel:
     def __init__(self):
@@ -192,7 +192,7 @@ async def test_structure_inference_cpu_fallback(monkeypatch, tmp_path):
 
   assert calls['count'] == 2
   assert calls['devices'] == ['cuda', 'cpu']
-  assert manager.analysis_device == 'cpu'
+  assert manager.analysis_device == 'cuda'
 
   await manager.shutdown()
 
@@ -237,9 +237,9 @@ async def test_storage_eviction_cancels_oldest(monkeypatch, tmp_path):
 
   from allin1.typings import AnalysisResult, Segment
 
-  def fake_run_inference(path, spec_path, model, device, include_activations, include_embeddings):
+  def fake_structure_inference(self, input_path, spec_path):
     return AnalysisResult(
-      path=Path(path),
+      path=Path(input_path),
       bpm=120,
       beats=[0.0],
       downbeats=[0.0],
@@ -249,7 +249,7 @@ async def test_storage_eviction_cancels_oldest(monkeypatch, tmp_path):
       embeddings=None,
     )
 
-  monkeypatch.setattr(job_manager, 'run_inference', fake_run_inference)
+  monkeypatch.setattr(job_manager.AnalysisJobManager, '_structure_inference_sync', fake_structure_inference, raising=False)
   monkeypatch.setattr(job_manager, 'load_pretrained_model', lambda *args, **kwargs: object())
 
   storage_root = tmp_path / 'storage'

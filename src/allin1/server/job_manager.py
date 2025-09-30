@@ -15,12 +15,18 @@ from pathlib import Path
 from typing import Dict, Iterable, Optional, Tuple
 
 import librosa
+import numpy as np
 import torch
 
-from ..helpers import run_inference
+from ..helpers import compute_activations
 from ..models import load_pretrained_model
+from ..postprocessing import (
+	estimate_tempo_from_beats,
+	postprocess_functional_structure,
+	postprocess_metrical_structure,
+)
 from ..spectrogram import extract_spectrograms
-from ..typings import AnalysisResult
+from ..typings import AllInOneOutput, AnalysisResult
 from .config import ServerSettings, StorageEvictionMode
 from .demucs_runtime import DemucsSeparator
 from .storage import (
@@ -73,14 +79,32 @@ class JobRecord:
 	job_id: str
 	metadata: JobMetadata
 	content_hash: str
-	stored: StoredJobMetadata
+	stored: Optional[StoredJobMetadata] = None
 	sample_rate: Optional[int] = None
 	stems_path: Optional[Path] = None
 	result: Optional[Dict] = None
 
+	def __post_init__(self):
+		if self.stored is None:
+			self.stored = StoredJobMetadata(
+				job_id=self.job_id,
+				user_hash=self.metadata.user_hash,
+				filename=self.metadata.filename,
+				content_hash=self.content_hash,
+				segment_start=self.metadata.segment_start,
+				segment_end=self.metadata.segment_end,
+			)
+
 	@property
 	def status(self) -> JobStatus:
 		return _STATE_TO_STATUS.get(self.stored.state, JobStatus.ERROR)
+
+	@status.setter
+	def status(self, status: JobStatus):
+		state = _STATUS_TO_STATE.get(status)
+		if state is None:
+			raise ValueError(f'Unsupported job status: {status!r}')
+		self.stored.mark_state(state)
 
 	@property
 	def error(self) -> Optional[str]:
@@ -98,6 +122,8 @@ _STATE_TO_STATUS = {
 	StoredJobState.CANCELLED: JobStatus.CANCELLED,
 }
 
+_STATUS_TO_STATE = {status: state for state, status in _STATE_TO_STATUS.items()}
+
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +133,7 @@ class AnalysisJobManager:
 		self.settings = settings
 		self.demucs_device = self._select_device(settings.demucs_device or settings.device)
 		self.analysis_device = self._select_device(settings.analysis_device or settings.device)
+		self._configured_analysis_device = self.analysis_device
 		self._storage_root = ensure_storage_root(Path(settings.storage_root).expanduser())
 		self._storage_usage_bytes: int = 0
 
@@ -116,6 +143,10 @@ class AnalysisJobManager:
 		self._content_index: Dict[str, str] = {}
 		self._pending_stem: set[str] = set()
 		self._pending_structure: set[str] = set()
+		self._stem_pause_event = asyncio.Event()
+		self._stem_pause_event.set()
+		self._structure_mode_event = asyncio.Event()
+		self._structure_mode_active = False
 
 		self._stem_worker_task: Optional[asyncio.Task] = None
 		self._structure_worker_task: Optional[asyncio.Task] = None
@@ -130,6 +161,7 @@ class AnalysisJobManager:
 		await self._refresh_storage_usage()
 		if self.settings.preload_demucs:
 			await self._demucs.preload()
+		await self._maybe_begin_structure_mode()
 
 		self._stem_worker_task = asyncio.create_task(self._stem_worker_loop())
 		self._structure_worker_task = asyncio.create_task(self._structure_worker_loop())
@@ -269,9 +301,19 @@ class AnalysisJobManager:
 	async def _stem_worker_loop(self):
 		try:
 			while True:
-				batch = await self._gather_batch(self._stem_queue, self.settings.demucs_batch_size)
-				if not batch:
+				await self._stem_pause_event.wait()
+				try:
+					job_id = await asyncio.wait_for(self._stem_queue.get(), timeout=0.5)
+				except asyncio.TimeoutError:
 					continue
+				batch = [job_id]
+				while len(batch) < self.settings.demucs_batch_size:
+					try:
+						next_id = self._stem_queue.get_nowait()
+					except asyncio.QueueEmpty:
+						break
+					else:
+						batch.append(next_id)
 				try:
 					await self._process_stem_batch(batch)
 				finally:
@@ -279,15 +321,27 @@ class AnalysisJobManager:
 						with contextlib.suppress(KeyError):
 							self._pending_stem.remove(job_id)
 						self._stem_queue.task_done()
+				await self._maybe_begin_structure_mode()
 		except asyncio.CancelledError:
 			return
 
 	async def _structure_worker_loop(self):
 		try:
 			while True:
-				batch = await self._gather_batch(self._structure_queue, self.settings.structure_batch_size)
-				if not batch:
+				await self._structure_mode_event.wait()
+				try:
+					job_id = await asyncio.wait_for(self._structure_queue.get(), timeout=0.5)
+				except asyncio.TimeoutError:
+					await self._maybe_end_structure_mode()
 					continue
+				batch = [job_id]
+				while len(batch) < self.settings.structure_batch_size:
+					try:
+						next_id = self._structure_queue.get_nowait()
+					except asyncio.QueueEmpty:
+						break
+					else:
+						batch.append(next_id)
 				try:
 					await self._process_structure_batch(batch)
 				finally:
@@ -295,23 +349,9 @@ class AnalysisJobManager:
 						with contextlib.suppress(KeyError):
 							self._pending_structure.remove(job_id)
 						self._structure_queue.task_done()
+				await self._maybe_end_structure_mode()
 		except asyncio.CancelledError:
 			return
-
-	async def _gather_batch(self, queue: asyncio.Queue[str], batch_size: int) -> list[str]:
-		try:
-			job_id = await queue.get()
-		except asyncio.CancelledError:
-			raise
-		batch = [job_id]
-		while len(batch) < batch_size:
-			try:
-				job_id = queue.get_nowait()
-			except asyncio.QueueEmpty:
-				break
-			else:
-				batch.append(job_id)
-		return batch
 
 	async def _process_stem_batch(self, job_ids: Iterable[str]):
 		records = [self._jobs.get(job_id) for job_id in job_ids]
@@ -388,6 +428,7 @@ class AnalysisJobManager:
 		if not records:
 			return
 
+		await self._maybe_begin_structure_mode(force=True)
 		await self._ensure_harmonix_model()
 
 		for record in records:
@@ -412,6 +453,56 @@ class AnalysisJobManager:
 		finally:
 			self._clear_device_cache(self.analysis_device)
 		await self._enforce_storage_limit()
+
+	async def _maybe_begin_structure_mode(self, force: bool = False):
+		if self._structure_mode_active:
+			return
+		ready = self._structure_ready_count()
+		if ready == 0 and not force:
+			return
+		if force or ready >= self.settings.structure_prefetch_threshold or not self._stem_backlog():
+			await self._begin_structure_mode()
+
+	async def _begin_structure_mode(self):
+		if self._structure_mode_active:
+			return
+		self._structure_mode_active = True
+		self._stem_pause_event.clear()
+		while self._pending_stem:
+			await asyncio.sleep(0.05)
+		is_loaded = getattr(self._demucs, 'is_loaded', None)
+		try:
+			loaded = is_loaded() if callable(is_loaded) else True
+		except Exception:  # pylint: disable=broad-except
+			loaded = True
+		if loaded:
+			with contextlib.suppress(Exception):
+				self._demucs.release()
+		self._structure_mode_event.set()
+
+	async def _maybe_end_structure_mode(self):
+		if not self._structure_mode_active:
+			return
+		if not self._structure_queue.empty() or self._pending_structure or self._structure_ready_count() > 0:
+			return
+		await self._move_harmonix_model('cpu')
+		self._structure_mode_active = False
+		self._structure_mode_event.clear()
+		if self.settings.preload_demucs:
+			await self._demucs.preload()
+		else:
+			self._demucs.release()
+		self._stem_pause_event.set()
+
+	def _structure_ready_count(self) -> int:
+		return sum(
+			1
+			for record in self._jobs.values()
+			if record.stored.state == StoredJobState.STRUCT_PENDING
+		)
+
+	def _stem_backlog(self) -> bool:
+		return (not self._stem_queue.empty()) or bool(self._pending_stem)
 
 	async def _run_structure(self, record: JobRecord) -> AnalysisResult:
 		audio_path = input_path(self._storage_root, record.content_hash)
@@ -507,7 +598,7 @@ class AnalysisJobManager:
 			load_pretrained_model,
 			self.settings.harmonix_model,
 			None,
-			self.analysis_device,
+			'cpu',
 		)
 
 	async def load_structure_result(self, record: JobRecord) -> Optional[Dict]:
@@ -528,6 +619,11 @@ class AnalysisJobManager:
 				model.to('cpu')
 
 		await asyncio.to_thread(_cleanup)
+		self._harmonix_model = None
+		if torch.cuda.is_available():
+			with contextlib.suppress(Exception):
+				torch.cuda.empty_cache()
+				torch.cuda.ipc_collect()
 	async def _refresh_storage_usage(self) -> int:
 		usage = await asyncio.to_thread(calculate_storage_usage, self._storage_root)
 		self._storage_usage_bytes = usage
@@ -643,8 +739,11 @@ class AnalysisJobManager:
 		self._harmonix_model = None
 
 	async def _run_structure_with_retry(self, input_path: Path, spec_path: Path) -> AnalysisResult:
+		self.analysis_device = self._configured_analysis_device
 		try:
-			return await self._run_structure_once(input_path, spec_path)
+			result = await self._run_structure_once(input_path, spec_path)
+			self.analysis_device = self._configured_analysis_device
+			return result
 		except RuntimeError as exc:
 			if self._should_retry_on_cpu(exc):
 				previous_device = self.analysis_device
@@ -652,21 +751,130 @@ class AnalysisJobManager:
 				await self._move_harmonix_model('cpu')
 				self.analysis_device = 'cpu'
 				self._clear_device_cache(previous_device)
-				return await self._run_structure_once(input_path, spec_path)
+				result = await self._run_structure_once(input_path, spec_path)
+				self.analysis_device = self._configured_analysis_device
+				return result
 			raise
 
 	async def _run_structure_once(self, input_path: Path, spec_path: Path) -> AnalysisResult:
-		result = await asyncio.to_thread(
-			run_inference,
+		return await asyncio.to_thread(
+			self._structure_inference_sync,
 			input_path,
 			spec_path,
-			self._harmonix_model,
-			self.analysis_device,
-			self.settings.include_activations,
-			self.settings.include_embeddings,
 		)
-		self._clear_device_cache(self.analysis_device)
+
+	def _structure_inference_sync(self, input_path: Path, spec_path: Path) -> AnalysisResult:
+		spec = np.load(spec_path)
+		spec_tensor = torch.from_numpy(spec).unsqueeze(0).float()
+		logits = self._forward_harmonix(spec_tensor)
+		cfg = getattr(self._harmonix_model, 'cfg', None)
+		if cfg is None:
+			raise RuntimeError('Harmonix model is missing configuration metadata.')
+		metrical = postprocess_metrical_structure(logits, cfg)
+		functional = postprocess_functional_structure(logits, cfg)
+		bpm = estimate_tempo_from_beats(metrical['beats'])
+		result = AnalysisResult(
+			path=input_path,
+			bpm=bpm,
+			segments=functional,
+			**metrical,
+		)
+		if self.settings.include_activations:
+			result.activations = compute_activations(logits)
+		if self.settings.include_embeddings:
+			result.embeddings = logits.embeddings[0].detach().cpu().numpy()
 		return result
+
+	def _forward_harmonix(self, spec_tensor: torch.Tensor) -> AllInOneOutput:
+		desired_device = self.analysis_device
+		actual_device = desired_device if self._is_gpu_device(desired_device) and torch.cuda.is_available() else 'cpu'
+		self.analysis_device = actual_device
+		spec_on_device = spec_tensor.to(actual_device)
+		models = getattr(self._harmonix_model, 'models', None)
+		try:
+			if models:
+				output = self._forward_ensemble(spec_on_device, actual_device, models)
+			else:
+				output = self._forward_single_model(spec_on_device, actual_device, self._harmonix_model)
+		finally:
+			if actual_device != 'cpu':
+				del spec_on_device
+				self._clear_device_cache(actual_device)
+		return output
+
+	def _forward_single_model(self, spec_tensor: torch.Tensor, device: str, model) -> AllInOneOutput:
+		use_gpu = self._is_gpu_device(device) and torch.cuda.is_available()
+		try:
+			with torch.no_grad():
+				if use_gpu:
+					model.to(device)
+				output = model(spec_tensor)
+		except RuntimeError:
+			if use_gpu:
+				model.to('cpu')
+				self._clear_device_cache(device)
+			raise
+		output_cpu = self._detach_output(output)
+		if use_gpu:
+			model.to('cpu')
+			self._clear_device_cache(device)
+		return output_cpu
+
+	def _forward_ensemble(self, spec_tensor: torch.Tensor, device: str, models: Iterable[torch.nn.Module]) -> AllInOneOutput:
+		use_gpu = self._is_gpu_device(device) and torch.cuda.is_available()
+		sum_logits_beat = None
+		sum_logits_downbeat = None
+		sum_logits_section = None
+		sum_logits_function = None
+		embedding_tensors = []
+		count = 0
+		for sub_model in models:
+			try:
+				with torch.no_grad():
+					if use_gpu:
+						sub_model.to(device)
+					output = sub_model(spec_tensor)
+			except RuntimeError:
+				if use_gpu:
+					sub_model.to('cpu')
+					self._clear_device_cache(device)
+				raise
+			output_cpu = self._detach_output(output)
+			if sum_logits_beat is None:
+				sum_logits_beat = output_cpu.logits_beat.clone()
+				sum_logits_downbeat = output_cpu.logits_downbeat.clone()
+				sum_logits_section = output_cpu.logits_section.clone()
+				sum_logits_function = output_cpu.logits_function.clone()
+			else:
+				sum_logits_beat += output_cpu.logits_beat
+				sum_logits_downbeat += output_cpu.logits_downbeat
+				sum_logits_section += output_cpu.logits_section
+				sum_logits_function += output_cpu.logits_function
+			embedding_tensors.append(output_cpu.embeddings.unsqueeze(-1))
+			count += 1
+			if use_gpu:
+				sub_model.to('cpu')
+				self._clear_device_cache(device)
+		if count == 0:
+			raise RuntimeError('Harmonix ensemble is empty; cannot perform inference.')
+		embeddings = torch.cat(embedding_tensors, dim=-1)
+		return AllInOneOutput(
+			logits_beat=sum_logits_beat / count,
+			logits_downbeat=sum_logits_downbeat / count,
+			logits_section=sum_logits_section / count,
+			logits_function=sum_logits_function / count,
+			embeddings=embeddings,
+		)
+
+	@staticmethod
+	def _detach_output(output: AllInOneOutput) -> AllInOneOutput:
+		return AllInOneOutput(
+			logits_beat=output.logits_beat.detach().cpu(),
+			logits_downbeat=output.logits_downbeat.detach().cpu(),
+			logits_section=output.logits_section.detach().cpu(),
+			logits_function=output.logits_function.detach().cpu(),
+			embeddings=output.embeddings.detach().cpu(),
+		)
 
 	def _should_retry_on_cpu(self, exc: RuntimeError) -> bool:
 		message = str(exc).lower()

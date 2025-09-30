@@ -70,6 +70,11 @@ class ServerSettings(BaseSettings):
     True,
     description='Release Demucs model memory after each batch completes.',
   )
+  structure_prefetch_threshold: int = Field(
+    5,
+    ge=1,
+    description='Number of stem-completed jobs that triggers switching to Harmonix analysis while stems remain queued.',
+  )
   cleanup_interval_seconds: int = Field(
     30,
     ge=1,

@@ -2,13 +2,13 @@ import numpy as np
 import torch
 import json
 
-from os import PathLike
+from os import PathLike as _OsPathLike
 from pathlib import Path
 from typing import List, Dict, Optional, Union
 from dataclasses import dataclass
 from numpy.typing import NDArray
 
-PathLike = Union[str, PathLike]
+PathLike = Union[str, _OsPathLike[str]]
 
 
 @dataclass

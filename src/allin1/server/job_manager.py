@@ -196,6 +196,7 @@ class AnalysisJobManager:
 				potential_path = stems_zip_path(self._storage_root, record.content_hash)
 				if potential_path.exists():
 					record.stems_path = potential_path
+			logger.info('Reusing cached job %s for hash %s', record.job_id, content_hash[:8])
 			return record
 
 		job_id = str(uuid.uuid4())
@@ -211,6 +212,7 @@ class AnalysisJobManager:
 		record = JobRecord(job_id=job_id, metadata=metadata, content_hash=content_hash, stored=stored)
 		self._jobs[job_id] = record
 		self._content_index[content_hash] = job_id
+		logger.info('Queued job %s (%s)', job_id, metadata.filename)
 
 		await self._ensure_storage_capacity(len(audio_bytes))
 		input_file = await self._store_audio(record, audio_bytes)
@@ -364,6 +366,7 @@ class AnalysisJobManager:
 			return
 
 		await self._demucs.preload()
+		logger.info('Starting Demucs separation for jobs: %s', ', '.join(record.job_id for record in records))
 
 		for record in records:
 			record.stored.mark_state(StoredJobState.STEMS_RUNNING)
@@ -373,6 +376,7 @@ class AnalysisJobManager:
 			for record in records:
 				try:
 					await self._prepare_stems(record)
+					logger.info('Stems ready for job %s (sample_rate=%s)', record.job_id, record.sample_rate)
 					await self._enqueue_structure_job(record)
 				except Exception as exc:  # pylint: disable=broad-except
 					logger.exception('Demucs separation failed for job %s', record.job_id)
@@ -382,6 +386,7 @@ class AnalysisJobManager:
 			self._clear_device_cache(self.demucs_device)
 			if self.settings.demucs_release_after_batch:
 				self._demucs.release()
+		logger.info('Finished Demucs separation for jobs: %s', ', '.join(record.job_id for record in records))
 		await self._enforce_storage_limit()
 
 	async def _prepare_stems(self, record: JobRecord):
@@ -430,6 +435,7 @@ class AnalysisJobManager:
 
 		await self._maybe_begin_structure_mode(force=True)
 		await self._ensure_harmonix_model()
+		logger.info('Starting structure analysis for jobs: %s', ', '.join(record.job_id for record in records))
 
 		for record in records:
 			record.stored.mark_state(StoredJobState.STRUCT_RUNNING)
@@ -446,12 +452,14 @@ class AnalysisJobManager:
 					record.stored.mark_structure_ready()
 					record.stored.mark_state(StoredJobState.COMPLETED)
 					await self._persist_metadata(record.stored)
+					logger.info('Structure analysis completed for job %s', record.job_id)
 				except Exception as exc:  # pylint: disable=broad-except
 					logger.exception('Structure analysis failed for job %s', record.job_id)
 					record.stored.mark_state(StoredJobState.ERROR, error=str(exc))
 					await self._persist_metadata(record.stored)
 		finally:
 			self._clear_device_cache(self.analysis_device)
+		logger.info('Finished structure analysis for jobs: %s', ', '.join(record.job_id for record in records))
 		await self._enforce_storage_limit()
 
 	async def _maybe_begin_structure_mode(self, force: bool = False):
@@ -461,6 +469,7 @@ class AnalysisJobManager:
 		if ready == 0 and not force:
 			return
 		if force or ready >= self.settings.structure_prefetch_threshold or not self._stem_backlog():
+			logger.info('Switching to structure mode (ready=%d, force=%s)', ready, force)
 			await self._begin_structure_mode()
 
 	async def _begin_structure_mode(self):
@@ -493,6 +502,7 @@ class AnalysisJobManager:
 		else:
 			self._demucs.release()
 		self._stem_pause_event.set()
+		logger.info('Structure mode idle; Demucs queue resumed')
 
 	def _structure_ready_count(self) -> int:
 		return sum(
@@ -512,6 +522,7 @@ class AnalysisJobManager:
 		demix_dir = stems_dir(self._storage_root, record.content_hash)
 		if not demix_dir.exists():
 			raise FileNotFoundError(f'Stem directory missing for job {record.job_id}')
+		logger.info('Extracting spectrograms for job %s', record.job_id)
 
 		spec_dir = job_root(self._storage_root, record.content_hash) / 'spec'
 
@@ -741,16 +752,18 @@ class AnalysisJobManager:
 	async def _run_structure_with_retry(self, input_path: Path, spec_path: Path) -> AnalysisResult:
 		self.analysis_device = self._configured_analysis_device
 		try:
+			logger.info('Running structure inference for %s on %s', input_path.name, self.analysis_device)
 			result = await self._run_structure_once(input_path, spec_path)
 			self.analysis_device = self._configured_analysis_device
 			return result
 		except RuntimeError as exc:
 			if self._should_retry_on_cpu(exc):
 				previous_device = self.analysis_device
-				logger.warning('Structure inference failed on %s due to OOM; retrying on CPU.', previous_device)
+				logger.warning('Structure inference failed on %s due to %s; retrying on CPU.', previous_device, exc)
 				await self._move_harmonix_model('cpu')
 				self.analysis_device = 'cpu'
 				self._clear_device_cache(previous_device)
+				logger.info('Retrying structure inference for %s on CPU', input_path.name)
 				result = await self._run_structure_once(input_path, spec_path)
 				self.analysis_device = self._configured_analysis_device
 				return result

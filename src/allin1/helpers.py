@@ -14,6 +14,8 @@ from .postprocessing import (
   postprocess_metrical_structure,
   postprocess_functional_structure,
   estimate_tempo_from_beats,
+  analyze_structure_with_librosa,
+  analyze_structure_lightweight,
 )
 
 
@@ -33,11 +35,19 @@ def run_inference(
   metrical_structure = postprocess_metrical_structure(logits, model.cfg)
   functional_structure = postprocess_functional_structure(logits, model.cfg)
   bpm = estimate_tempo_from_beats(metrical_structure['beats'])
+  
+  # Perform lightweight librosa analysis to avoid CPU issues
+  librosa_analysis = analyze_structure_lightweight(
+    path,
+    metrical_structure['beats'],
+    metrical_structure.get('downbeats', [])
+  )
 
   result = AnalysisResult(
     path=path,
     bpm=bpm,
     segments=functional_structure,
+    librosa_analysis=librosa_analysis,
     **metrical_structure,
   )
 
@@ -105,17 +115,17 @@ def save_results(
   out_dir.mkdir(parents=True, exist_ok=True)
   for result in results:
     out_path = out_dir / result.path.with_suffix('.json').name
-    result = asdict(result)
-    result['path'] = str(result['path'])
+    result_dict = asdict(result)
+    result_dict['path'] = str(result_dict['path'])
 
-    activations = result.pop('activations')
+    activations = result_dict.pop('activations')
     if activations is not None:
       np.savez(str(out_path.with_suffix('.activ.npz')), **activations)
 
-    embeddings = result.pop('embeddings')
+    embeddings = result_dict.pop('embeddings')
     if embeddings is not None:
       np.save(str(out_path.with_suffix('.embed.npy')), embeddings)
 
-    json_str = json.dumps(result, indent=2)
+    json_str = json.dumps(result_dict, indent=2)
     json_str = compact_json_number_array(json_str)
     out_path.with_suffix('.json').write_text(json_str)

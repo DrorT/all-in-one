@@ -37,6 +37,7 @@ class AnalysisResult:
   segments: List[Segment]
   activations: Optional[Dict[str, NDArray]] = None
   embeddings: Optional[NDArray] = None
+  librosa_analysis: Optional[Dict] = None
 
   @staticmethod
   def from_json(
@@ -57,6 +58,7 @@ class AnalysisResult:
       downbeats=data['downbeats'],
       beat_positions=data['beat_positions'],
       segments=[Segment(**seg) for seg in data['segments']],
+      librosa_analysis=data.get('librosa_analysis'),
     )
 
     if load_activations:

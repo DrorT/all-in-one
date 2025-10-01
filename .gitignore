@@ -237,3 +237,9 @@ pyrightconfig.json
 # server inputs/outputs
 client_outputs/
 processed_audio/
+results/
+combined_results/
+librosa_results/
+madmom_results/
+comparison_results/
+comprehensive_results/

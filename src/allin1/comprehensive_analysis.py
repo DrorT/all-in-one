@@ -25,6 +25,12 @@ import essentia
 import essentia.standard as es
 from essentia import Pool
 
+# Clustering and segmentation
+from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.decomposition import PCA
+from sklearn.metrics import silhouette_score
+
 # Reduce Essentia logging noise (e.g., TriangularBands filter-bank info messages)
 essentia.log.infoActive = False
 
@@ -116,6 +122,29 @@ class TimeBasedFeatures:
 
 
 @dataclass
+class SegmentInfo:
+    """Data class for track segment information"""
+    start_time: float
+    end_time: float
+    segment_id: int
+    cluster_id: int
+    features: Dict[str, float]
+    dominant_genre: Optional[str] = None
+    genre_confidence: Optional[float] = None
+
+
+@dataclass
+class SegmentationResult:
+    """Data class for track segmentation results"""
+    segments: List[SegmentInfo]
+    num_clusters: int
+    cluster_labels: np.ndarray
+    feature_names: List[str]
+    clustering_method: str
+    silhouette_score: Optional[float] = None
+
+
+@dataclass
 class ComprehensiveAnalysisResult:
     """Data class for comprehensive analysis results"""
     path: Path
@@ -123,6 +152,7 @@ class ComprehensiveAnalysisResult:
     discogs_info: Optional[DiscogsInfo]
     time_based_features: TimeBasedFeatures
     original_analysis: Optional[AnalysisResult] = None
+    segmentation_result: Optional[SegmentationResult] = None
 
 
 class EssentiaAnalyzer:
@@ -964,6 +994,349 @@ class HeatmapVisualizer:
             print(f"Timeline saved to {output_path}")
             
         return fig
+    
+    def create_segmentation_visualization(self, segmentation_result: SegmentationResult,
+                                        output_path: Optional[PathLike] = None) -> plt.Figure:
+        """Create a visualization of track segmentation results"""
+        segments = segmentation_result.segments
+        cluster_labels = segmentation_result.cluster_labels
+        
+        # Create figure with subplots
+        fig, axes = plt.subplots(3, 1, figsize=(14, 10),
+                                gridspec_kw={'height_ratios': [2, 1, 1]})
+        
+        # 1. Segment timeline with clusters
+        ax1 = axes[0]
+        colors = plt.cm.tab10(np.linspace(0, 1, segmentation_result.num_clusters))
+        
+        for segment in segments:
+            color = colors[segment.cluster_id % len(colors)]
+            ax1.barh(0, segment.end_time - segment.start_time,
+                    left=segment.start_time, height=0.5,
+                    color=color, alpha=0.7,
+                    label=f'Cluster {segment.cluster_id}' if segment.segment_id == 0 or
+                    (segment.segment_id > 0 and segments[segment.segment_id-1].cluster_id != segment.cluster_id) else "")
+        
+        ax1.set_xlabel('Time (seconds)')
+        ax1.set_title('Track Segmentation by Feature Similarity')
+        ax1.set_yticks([])
+        ax1.legend(loc='upper right')
+        ax1.grid(True, alpha=0.3)
+        
+        # Format x-axis to show time in minutes:seconds
+        max_time = max([s.end_time for s in segments]) if segments else 100
+        time_ticks = np.linspace(0, max_time, min(10, len(segments)))
+        time_labels = [f"{t/60:.1f}:{t%60:.0f}" for t in time_ticks]
+        ax1.set_xticks(time_ticks)
+        ax1.set_xticklabels(time_labels)
+        
+        # 2. Feature heatmap by cluster
+        ax2 = axes[1]
+        
+        # Create feature matrix for heatmap
+        feature_matrix = []
+        for segment in segments:
+            feature_vector = [segment.features.get(name, 0) for name in segmentation_result.feature_names]
+            feature_matrix.append(feature_vector)
+        
+        feature_matrix = np.array(feature_matrix)
+        
+        # Sort segments by cluster for better visualization
+        sorted_indices = np.argsort(cluster_labels)
+        sorted_matrix = feature_matrix[sorted_indices]
+        sorted_labels = cluster_labels[sorted_indices]
+        
+        # Create heatmap
+        im = ax2.imshow(sorted_matrix.T, aspect='auto', cmap='viridis', interpolation='nearest')
+        ax2.set_xlabel('Segment (sorted by cluster)')
+        ax2.set_ylabel('Features')
+        ax2.set_title('Feature Values by Segment')
+        ax2.set_yticks(np.arange(len(segmentation_result.feature_names)))
+        ax2.set_yticklabels(segmentation_result.feature_names)
+        
+        # Add cluster boundaries
+        cluster_boundaries = np.where(np.diff(sorted_labels) != 0)[0] + 0.5
+        for boundary in cluster_boundaries:
+            ax2.axvline(x=boundary, color='white', linestyle='--', linewidth=1)
+        
+        # Add colorbar
+        plt.colorbar(im, ax=ax2, label='Normalized Feature Value')
+        
+        # 3. Cluster information
+        ax3 = axes[2]
+        ax3.axis('off')
+        
+        # Calculate cluster statistics
+        cluster_info = {}
+        for segment in segments:
+            cluster_id = segment.cluster_id
+            if cluster_id not in cluster_info:
+                cluster_info[cluster_id] = {
+                    'count': 0,
+                    'duration': 0,
+                    'genres': {},
+                    'avg_features': {}
+                }
+            
+            cluster_info[cluster_id]['count'] += 1
+            cluster_info[cluster_id]['duration'] += segment.end_time - segment.start_time
+            
+            # Track dominant genres
+            if segment.dominant_genre:
+                genre = segment.dominant_genre
+                if '---' in genre:
+                    genre = genre.split('---')[1]
+                if genre not in cluster_info[cluster_id]['genres']:
+                    cluster_info[cluster_id]['genres'][genre] = 0
+                cluster_info[cluster_id]['genres'][genre] += 1
+        
+        # Display cluster information
+        info_text = f"Clustering Method: {segmentation_result.clustering_method}\n"
+        info_text += f"Number of Clusters: {segmentation_result.num_clusters}\n"
+        if segmentation_result.silhouette_score is not None:
+            info_text += f"Silhouette Score: {segmentation_result.silhouette_score:.3f}\n"
+        
+        info_text += "\nCluster Information:\n"
+        for cluster_id, info in sorted(cluster_info.items()):
+            info_text += f"\nCluster {cluster_id}: {info['count']} segments, {info['duration']:.1f}s total\n"
+            
+            # Get top genre for this cluster
+            if info['genres']:
+                top_genre = max(info['genres'].items(), key=lambda x: x[1])
+                info_text += f"  Dominant Genre: {top_genre[0]} ({top_genre[1]} segments)\n"
+        
+        ax3.text(0.05, 0.95, info_text, transform=ax3.transAxes,
+                fontsize=10, verticalalignment='top', fontfamily='monospace')
+        
+        plt.tight_layout()
+        
+        if output_path:
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+            print(f"Segmentation visualization saved to {output_path}")
+            
+        return fig
+
+
+class TrackSegmenter:
+    """Class for segmenting tracks based on feature similarity"""
+    
+    def __init__(self, method: str = 'kmeans', n_clusters: int = 4,
+                 include_genre: bool = True, genre_type: str = 'sub', scaler: str = 'standard'):
+        """
+        Initialize the track segmenter
+        
+        Parameters
+        ----------
+        method : str, optional
+            Clustering method ('kmeans', 'dbscan', 'hierarchical') (default: 'kmeans')
+        n_clusters : int, optional
+            Number of clusters for methods that require it (default: 4)
+        include_genre : bool, optional
+            Whether to include genre features in clustering (default: True)
+        genre_type : str, optional
+            Which part of the genre label to use ('primary', 'sub', 'full') (default: 'sub')
+        scaler : str, optional
+            Feature scaling method ('standard', 'minmax', 'none') (default: 'standard')
+        """
+        self.method = method
+        self.n_clusters = n_clusters
+        self.include_genre = include_genre
+        self.genre_type = genre_type
+        self.scaler_name = scaler
+        
+        # Initialize scaler
+        if scaler == 'standard':
+            self.scaler = StandardScaler()
+        elif scaler == 'minmax':
+            self.scaler = MinMaxScaler()
+        else:
+            self.scaler = None
+    
+    def _extract_genre_label(self, genre_label: str) -> str:
+        """
+        Extract the appropriate part of the genre label based on genre_type
+        
+        Parameters
+        ----------
+        genre_label : str
+            Full genre label (e.g., "Electronic---House")
+            
+        Returns
+        -------
+        str
+            Extracted genre label based on genre_type
+        """
+        if '---' in genre_label:
+            primary, sub = genre_label.split('---', 1)
+            
+            if self.genre_type == 'primary':
+                return primary
+            elif self.genre_type == 'sub':
+                return sub
+            else:  # 'full'
+                return genre_label
+        else:
+            # If no separator, return the full label
+            return genre_label
+    
+    def prepare_features(self, time_based_features: TimeBasedFeatures) -> Tuple[np.ndarray, List[str]]:
+        """
+        Prepare and normalize features for clustering
+        
+        Parameters
+        ----------
+        time_based_features : TimeBasedFeatures
+            Time-based features from analysis
+            
+        Returns
+        -------
+        Tuple[np.ndarray, List[str]]
+            Feature matrix and feature names
+        """
+        features = time_based_features.features
+        feature_names = []
+        feature_vectors = []
+        
+        # Select scalar features (exclude 2D arrays)
+        scalar_features = [
+            'danceability', 'energy', 'valence', 'tempo',
+            'spectral_centroid', 'spectral_rolloff', 'spectral_bandwidth',
+            'zero_crossing_rate'
+        ]
+        
+        # Add scalar features
+        for feature in scalar_features:
+            if feature in features and len(features[feature]) > 0:
+                feature_names.append(feature)
+                feature_vectors.append(features[feature])
+        
+        # Add genre features if available and enabled
+        if (self.include_genre and
+            time_based_features.genre_predictions is not None and
+            time_based_features.genre_labels is not None and
+            len(time_based_features.genre_predictions) > 0):
+            
+            # Get top genre probabilities for each segment
+            genre_preds = time_based_features.genre_predictions
+            
+            # Add top 3 genre probabilities as features
+            for i in range(min(3, genre_preds.shape[1])):
+                genre_probs = genre_preds[:, i]
+                feature_names.append(f'genre_prob_{i+1}')
+                feature_vectors.append(genre_probs)
+        
+        # Stack features horizontally
+        if feature_vectors:
+            feature_matrix = np.column_stack(feature_vectors)
+        else:
+            raise ValueError("No valid features found for clustering")
+        
+        # Apply scaling if specified
+        if self.scaler is not None:
+            feature_matrix = self.scaler.fit_transform(feature_matrix)
+        
+        return feature_matrix, feature_names
+    
+    def segment_track(self, time_based_features: TimeBasedFeatures,
+                     segment_duration: float = 5.0) -> SegmentationResult:
+        """
+        Segment the track based on feature similarity
+        
+        Parameters
+        ----------
+        time_based_features : TimeBasedFeatures
+            Time-based features from analysis
+        segment_duration : float, optional
+            Duration of each segment in seconds (default: 5.0)
+            
+        Returns
+        -------
+        SegmentationResult
+            Segmentation results with cluster information
+        """
+        # Prepare features for clustering
+        feature_matrix, feature_names = self.prepare_features(time_based_features)
+        time_stamps = time_based_features.time_stamps
+        
+        # Perform clustering
+        if self.method == 'kmeans':
+            clusterer = KMeans(n_clusters=self.n_clusters, random_state=42)
+            cluster_labels = clusterer.fit_predict(feature_matrix)
+        elif self.method == 'dbscan':
+            # DBSCAN doesn't require n_clusters, but we need to set eps and min_samples
+            clusterer = DBSCAN(eps=0.5, min_samples=2)
+            cluster_labels = clusterer.fit_predict(feature_matrix)
+            # DBSCAN may label some points as noise (-1)
+            self.n_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)
+        elif self.method == 'hierarchical':
+            clusterer = AgglomerativeClustering(n_clusters=self.n_clusters)
+            cluster_labels = clusterer.fit_predict(feature_matrix)
+        else:
+            raise ValueError(f"Unknown clustering method: {self.method}")
+        
+        # Calculate silhouette score if we have more than 1 cluster
+        silhouette = None
+        if self.n_clusters > 1 and len(set(cluster_labels)) > 1:
+            try:
+                silhouette = silhouette_score(feature_matrix, cluster_labels)
+            except Exception as e:
+                print(f"Could not calculate silhouette score: {e}")
+        
+        # Create segment information
+        segments = []
+        for i, (time_stamp, cluster_id) in enumerate(zip(time_stamps, cluster_labels)):
+            # Calculate segment boundaries
+            if i == 0:
+                start_time = 0.0
+            else:
+                start_time = max(0.0, time_stamp - segment_duration / 2)
+            
+            if i == len(time_stamps) - 1:
+                # For the last segment, we don't know the exact end, so estimate
+                end_time = time_stamp + segment_duration / 2
+            else:
+                end_time = time_stamps[i + 1] if i + 1 < len(time_stamps) else time_stamp + segment_duration
+            
+            # Extract features for this segment
+            segment_features = {}
+            for j, feature_name in enumerate(feature_names):
+                if j < feature_matrix.shape[1]:
+                    segment_features[feature_name] = float(feature_matrix[i, j])
+            
+            # Get dominant genre if available
+            dominant_genre = None
+            genre_confidence = None
+            if (self.include_genre and
+                time_based_features.genre_predictions is not None and
+                time_based_features.genre_labels is not None and
+                i < len(time_based_features.genre_predictions)):
+                
+                genre_probs = time_based_features.genre_predictions[i]
+                if len(genre_probs) > 0:
+                    top_idx = np.argmax(genre_probs)
+                    if top_idx < len(time_based_features.genre_labels):
+                        full_genre_label = time_based_features.genre_labels[top_idx]
+                        dominant_genre = self._extract_genre_label(full_genre_label)
+                        genre_confidence = float(genre_probs[top_idx])
+            
+            segments.append(SegmentInfo(
+                start_time=start_time,
+                end_time=end_time,
+                segment_id=i,
+                cluster_id=cluster_id,
+                features=segment_features,
+                dominant_genre=dominant_genre,
+                genre_confidence=genre_confidence
+            ))
+        
+        return SegmentationResult(
+            segments=segments,
+            num_clusters=self.n_clusters,
+            cluster_labels=cluster_labels,
+            feature_names=feature_names,
+            clustering_method=self.method,
+            silhouette_score=silhouette
+        )
 
 
 class ComprehensiveAnalyzer:
@@ -973,6 +1346,7 @@ class ComprehensiveAnalyzer:
         self.essentia_analyzer = EssentiaAnalyzer()
         self.time_analyzer = TimeBasedAnalyzer()
         self.visualizer = HeatmapVisualizer()
+        self.segmenter = None
             
         # Initialize Discogs analyzer if enabled
         if enable_discogs:
@@ -990,7 +1364,11 @@ class ComprehensiveAnalyzer:
     
     def analyze(self, audio_path: PathLike,
                 original_analysis: Optional[AnalysisResult] = None,
-                output_dir: Optional[PathLike] = None) -> ComprehensiveAnalysisResult:
+                output_dir: Optional[PathLike] = None,
+                enable_segmentation: bool = False,
+                segmentation_method: str = 'kmeans',
+                n_clusters: int = 4,
+                genre_type: str = 'sub') -> ComprehensiveAnalysisResult:
         """Perform comprehensive analysis on an audio file"""
         audio_path = mkpath(audio_path)
         
@@ -1020,13 +1398,37 @@ class ComprehensiveAnalyzer:
         else:
             time_based_features = self.time_analyzer.extract_time_features(audio_path)
         
+        # Perform track segmentation if enabled
+        segmentation_result = None
+        if enable_segmentation:
+            print(f"Performing track segmentation using {segmentation_method}...")
+            try:
+                # Initialize segmenter with specified parameters
+                self.segmenter = TrackSegmenter(
+                    method=segmentation_method,
+                    n_clusters=n_clusters,
+                    include_genre=self.discogs_analyzer is not None,
+                    genre_type=genre_type  # Use the specified genre type
+                )
+                
+                # Perform segmentation
+                segmentation_result = self.segmenter.segment_track(time_based_features)
+                print(f"Segmented track into {segmentation_result.num_clusters} clusters")
+                if segmentation_result.silhouette_score is not None:
+                    print(f"Silhouette score: {segmentation_result.silhouette_score:.3f}")
+                    
+            except Exception as e:
+                print(f"Error in track segmentation: {e}")
+                segmentation_result = None
+        
         # Create comprehensive result
         result = ComprehensiveAnalysisResult(
             path=audio_path,
             essentia_features=essentia_features,
             discogs_info=discogs_info,
             time_based_features=time_based_features,
-            original_analysis=original_analysis
+            original_analysis=original_analysis,
+            segmentation_result=segmentation_result
         )
         
         # Save results and create visualizations if output directory is provided
@@ -1036,6 +1438,59 @@ class ComprehensiveAnalyzer:
         
         print("Comprehensive analysis complete!")
         return result
+    
+    def segment_track(self, audio_path: PathLike,
+                     method: str = 'kmeans',
+                     n_clusters: int = 4,
+                     segment_duration: float = 5.0) -> SegmentationResult:
+        """
+        Segment a track based on feature similarity
+        
+        Parameters
+        ----------
+        audio_path : PathLike
+            Path to the audio file
+        method : str, optional
+            Clustering method ('kmeans', 'dbscan', 'hierarchical') (default: 'kmeans')
+        n_clusters : int, optional
+            Number of clusters for methods that require it (default: 4)
+        segment_duration : float, optional
+            Duration of each segment in seconds (default: 5.0)
+            
+        Returns
+        -------
+        SegmentationResult
+            Segmentation results with cluster information
+        """
+        audio_path = mkpath(audio_path)
+        
+        # Extract time-based features with genre if available
+        if self.discogs_analyzer:
+            time_based_features = self.time_analyzer.extract_time_features_with_genre(
+                audio_path, discogs_analyzer=self.discogs_analyzer,
+                segment_duration=segment_duration
+            )
+        else:
+            time_based_features = self.time_analyzer.extract_time_features(
+                audio_path, segment_duration=segment_duration
+            )
+        
+        # Initialize segmenter
+        self.segmenter = TrackSegmenter(
+            method=method,
+            n_clusters=n_clusters,
+            include_genre=self.discogs_analyzer is not None,
+            genre_type='sub'  # Default to sub-genre
+        )
+        
+        # Perform segmentation
+        segmentation_result = self.segmenter.segment_track(time_based_features, segment_duration)
+        
+        print(f"Segmented track into {segmentation_result.num_clusters} clusters")
+        if segmentation_result.silhouette_score is not None:
+            print(f"Silhouette score: {segmentation_result.silhouette_score:.3f}")
+        
+        return segmentation_result
     
     def save_results(self, result: ComprehensiveAnalysisResult, output_dir: PathLike):
         """Save analysis results to files"""
@@ -1072,6 +1527,11 @@ class ComprehensiveAnalyzer:
             genre_timeline_path = output_dir / f"{result.path.stem}_genre_timeline.png"
             self.visualizer.create_genre_timeline(result.time_based_features, genre_timeline_path)
         
+        # Create segmentation visualization if segmentation was performed
+        if result.segmentation_result is not None:
+            segmentation_path = output_dir / f"{result.path.stem}_segmentation.png"
+            self.visualizer.create_segmentation_visualization(result.segmentation_result, segmentation_path)
+        
         print(f"Visualizations saved to {output_dir}")
 
 
@@ -1079,7 +1539,11 @@ def analyze_audio_comprehensive(audio_path: PathLike,
                                output_dir: Optional[PathLike] = None,
                                enable_discogs: bool = True,
                                discogs_model_path: Optional[str] = None,
-                               original_analysis: Optional[AnalysisResult] = None) -> ComprehensiveAnalysisResult:
+                               original_analysis: Optional[AnalysisResult] = None,
+                               enable_segmentation: bool = False,
+                               segmentation_method: str = 'kmeans',
+                               n_clusters: int = 4,
+                               genre_type: str = 'sub') -> ComprehensiveAnalysisResult:
     """
     Convenience function for comprehensive audio analysis
     
@@ -1095,6 +1559,14 @@ def analyze_audio_comprehensive(audio_path: PathLike,
         Path to the Discogs model file. Required if the model is not in Essentia's installation.
     original_analysis : AnalysisResult, optional
         Original analysis result from the main allin1 analyzer
+    enable_segmentation : bool, optional
+        Whether to enable track segmentation (default: False)
+    segmentation_method : str, optional
+        Clustering method for segmentation ('kmeans', 'dbscan', 'hierarchical') (default: 'kmeans')
+    n_clusters : int, optional
+        Number of clusters for segmentation (default: 4)
+    genre_type : str, optional
+        Which part of the genre label to use for segmentation ('primary', 'sub', 'full') (default: 'sub')
         
     Returns
     -------
@@ -1102,4 +1574,37 @@ def analyze_audio_comprehensive(audio_path: PathLike,
         Comprehensive analysis results
     """
     analyzer = ComprehensiveAnalyzer(enable_discogs=enable_discogs, discogs_model_path=discogs_model_path)
-    return analyzer.analyze(audio_path, original_analysis, output_dir)
+    return analyzer.analyze(
+        audio_path, original_analysis, output_dir,
+        enable_segmentation, segmentation_method, n_clusters, genre_type
+    )
+
+
+def segment_audio_track(audio_path: PathLike,
+                       method: str = 'kmeans',
+                       n_clusters: int = 4,
+                       segment_duration: float = 5.0,
+                       discogs_model_path: Optional[str] = None) -> SegmentationResult:
+    """
+    Convenience function for track segmentation
+    
+    Parameters
+    ----------
+    audio_path : PathLike
+        Path to the audio file to segment
+    method : str, optional
+        Clustering method ('kmeans', 'dbscan', 'hierarchical') (default: 'kmeans')
+    n_clusters : int, optional
+        Number of clusters for methods that require it (default: 4)
+    segment_duration : float, optional
+        Duration of each segment in seconds (default: 5.0)
+    discogs_model_path : str, optional
+        Path to the Discogs model file. Required if the model is not in Essentia's installation.
+        
+    Returns
+    -------
+    SegmentationResult
+        Segmentation results with cluster information
+    """
+    analyzer = ComprehensiveAnalyzer(enable_discogs=True, discogs_model_path=discogs_model_path)
+    return analyzer.segment_track(audio_path, method, n_clusters, segment_duration)

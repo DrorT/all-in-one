@@ -38,8 +38,17 @@ Examples:
   # Including original allin1 analysis
   python comprehensive_audio_analyzer.py --input song.wav --output results/ --include-original
   
+  # With track segmentation
+  python comprehensive_audio_analyzer.py --input song.wav --output results/ --enable-segmentation --num-clusters 4
+  
+  # With hierarchical clustering segmentation
+  python comprehensive_audio_analyzer.py --input song.wav --output results/ --enable-segmentation --segmentation-method hierarchical --num-clusters 5
+  
+  # With primary genre segmentation
+  python comprehensive_audio_analyzer.py --input song.wav --output results/ --enable-segmentation --genre-type primary --num-clusters 4
+  
   # Complete analysis with all features
-  python comprehensive_audio_analyzer.py --input song.wav --output results/ --discogs-model path/to/discogs-effnet-bs64-1.pb --include-original --verbose
+  python comprehensive_audio_analyzer.py --input song.wav --output results/ --discogs-model path/to/discogs-effnet-bs64-1.pb --include-original --enable-segmentation --segmentation-method kmeans --num-clusters 4 --genre-type sub --verbose
         """
     )
     
@@ -75,6 +84,35 @@ Examples:
         type=float,
         default=5.0,
         help="Duration in seconds for time-based analysis segments (default: 5.0)"
+    )
+    
+    parser.add_argument(
+        "--enable-segmentation", "-es",
+        action="store_true",
+        help="Enable track segmentation based on feature similarity"
+    )
+    
+    parser.add_argument(
+        "--segmentation-method", "-sm",
+        type=str,
+        choices=['kmeans', 'dbscan', 'hierarchical'],
+        default='kmeans',
+        help="Clustering method for track segmentation (default: kmeans)"
+    )
+    
+    parser.add_argument(
+        "--num-clusters", "-nc",
+        type=int,
+        default=4,
+        help="Number of clusters for segmentation methods that require it (default: 4)"
+    )
+    
+    parser.add_argument(
+        "--genre-type", "-gt",
+        type=str,
+        choices=['primary', 'sub', 'full'],
+        default='sub',
+        help="Which part of the genre label to use for segmentation (primary, sub, full) (default: sub)"
     )
     
     parser.add_argument(
@@ -128,7 +166,11 @@ Examples:
             audio_path=input_path,
             output_dir=output_path,
             original_analysis=original_analysis,
-            discogs_model_path=args.discogs_model
+            discogs_model_path=args.discogs_model,
+            enable_segmentation=args.enable_segmentation,
+            segmentation_method=args.segmentation_method,
+            n_clusters=args.num_clusters,
+            genre_type=args.genre_type
         )
         
         if args.verbose:
@@ -177,10 +219,53 @@ Examples:
         print(f"Average energy: {np.mean(features['energy']):.3f}")
         print(f"Energy range: {np.min(features['energy']):.3f} - {np.max(features['energy']):.3f}")
     
+    # Print segmentation results if available
+    if comprehensive_result.segmentation_result:
+        print("\n--- Track Segmentation ---")
+        seg_result = comprehensive_result.segmentation_result
+        print(f"Clustering method: {seg_result.clustering_method}")
+        print(f"Number of clusters: {seg_result.num_clusters}")
+        
+        if seg_result.silhouette_score is not None:
+            print(f"Silhouette score: {seg_result.silhouette_score:.3f}")
+        
+        # Print cluster information
+        cluster_info = {}
+        for segment in seg_result.segments:
+            cluster_id = segment.cluster_id
+            if cluster_id not in cluster_info:
+                cluster_info[cluster_id] = {
+                    'count': 0,
+                    'duration': 0,
+                    'genres': {}
+                }
+            
+            cluster_info[cluster_id]['count'] += 1
+            cluster_info[cluster_id]['duration'] += segment.end_time - segment.start_time
+            
+            # Track dominant genres
+            if segment.dominant_genre:
+                genre = segment.dominant_genre
+                if '---' in genre:
+                    genre = genre.split('---')[1]
+                if genre not in cluster_info[cluster_id]['genres']:
+                    cluster_info[cluster_id]['genres'][genre] = 0
+                cluster_info[cluster_id]['genres'][genre] += 1
+        
+        for cluster_id, info in sorted(cluster_info.items()):
+            print(f"  Cluster {cluster_id}: {info['count']} segments, {info['duration']:.1f}s total")
+            
+            if info['genres']:
+                top_genre = max(info['genres'].items(), key=lambda x: x[1])
+                print(f"    Dominant genre: {top_genre[0]} ({top_genre[1]} segments)")
+    
     print(f"\nResults saved to: {output_path}")
     print(f"  - Comprehensive analysis: {output_path / (input_path.stem + '_comprehensive_analysis.json')}")
     print(f"  - Heatmap visualization: {output_path / (input_path.stem + '_heatmap.png')}")
     print(f"  - Timeline visualization: {output_path / (input_path.stem + '_timeline.png')}")
+    
+    if comprehensive_result.segmentation_result:
+        print(f"  - Segmentation visualization: {output_path / (input_path.stem + '_segmentation.png')}")
     
     if args.include_original:
         print(f"  - Original analysis: {output_path / 'original_analysis'}")

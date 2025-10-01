@@ -25,6 +25,17 @@ import essentia
 import essentia.standard as es
 from essentia import Pool
 
+# Madmom for beat and downbeat tracking
+try:
+    import madmom
+    from madmom.io.audio import load_audio_file
+    from madmom.features.beats import RNNBeatProcessor, BeatTrackingProcessor
+    from madmom.features.downbeats import RNNDownBeatProcessor, DBNDownBeatTrackingProcessor
+    MADMOM_AVAILABLE = True
+except ImportError:
+    MADMOM_AVAILABLE = False
+    print("Madmom not available. Install with: pip install madmom")
+
 # Clustering and segmentation
 from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
@@ -76,6 +87,16 @@ def _to_serializable(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     return value
+
+
+@dataclass
+class MadmomFeatures:
+    """Data class for Madmom extracted features"""
+    beats: np.ndarray
+    downbeats: np.ndarray
+    tempo: float
+    beat_consistency: float
+    beat_intervals: np.ndarray
 
 
 @dataclass
@@ -149,6 +170,7 @@ class ComprehensiveAnalysisResult:
     """Data class for comprehensive analysis results"""
     path: Path
     essentia_features: EssentiaFeatures
+    madmom_features: Optional[MadmomFeatures]
     discogs_info: Optional[DiscogsInfo]
     time_based_features: TimeBasedFeatures
     original_analysis: Optional[AnalysisResult] = None
@@ -383,6 +405,133 @@ class EssentiaAnalyzer:
             return 3  # Possibly 3/4
         else:
             return 4  # Default to 4/4
+
+
+class MadmomAnalyzer:
+    """Class for extracting beats and downbeats using Madmom"""
+    
+    def __init__(self):
+        if not MADMOM_AVAILABLE:
+            raise ImportError("Madmom is not available. Install with: pip install madmom")
+    
+    def extract_beats_and_downbeats(self, audio_path: PathLike) -> Optional[MadmomFeatures]:
+        """Extract beats and downbeats using Madmom"""
+        audio_path = mkpath(audio_path)
+        
+        try:
+            # Load the audio file using madmom
+            signal, sample_rate = load_audio_file(str(audio_path))
+            
+            # Beat tracking with madmom
+            beat_processor = RNNBeatProcessor()
+            beat_activations = beat_processor(signal)
+            
+            # Track beats
+            beat_tracker = BeatTrackingProcessor(fps=100)
+            beats = beat_tracker(beat_activations)
+            
+            # Convert beat frames to time (madmom already returns times in seconds)
+            beat_times = beats
+            
+            # Calculate tempo from beat times using improved methods
+            if len(beat_times) > 1:
+                # Calculate beat intervals
+                beat_intervals = np.diff(beat_times)
+                
+                # Method 1: Primary - Use median for robustness against outliers
+                median_interval = np.median(beat_intervals)
+                tempo_from_median = 60.0 / median_interval if median_interval > 0 else 0.0
+                
+                # Method 2: Histogram-based estimation for most common interval
+                # Create histogram of intervals (focus on reasonable tempo range: 60-200 BPM)
+                valid_intervals = beat_intervals[(beat_intervals > 0.3) & (beat_intervals < 1.0)]  # 60-200 BPM range
+                if len(valid_intervals) > 0:
+                    hist_counts, hist_bins = np.histogram(valid_intervals, bins=50)
+                    most_common_bin_idx = np.argmax(hist_counts)
+                    most_common_interval = (hist_bins[most_common_bin_idx] + hist_bins[most_common_bin_idx + 1]) / 2
+                    tempo_from_histogram = 60.0 / most_common_interval if most_common_interval > 0 else 0.0
+                else:
+                    tempo_from_histogram = tempo_from_median
+                
+                # Method 3: Weighted average (weight by inverse of local variance)
+                # Calculate local variance for each interval (compare with neighbors)
+                local_variances = []
+                for i in range(len(beat_intervals)):
+                    # Get neighboring intervals (within ±2 positions)
+                    start_idx = max(0, i - 2)
+                    end_idx = min(len(beat_intervals), i + 3)
+                    local_intervals = beat_intervals[start_idx:end_idx]
+                    if len(local_intervals) > 1:
+                        local_variances.append(np.var(local_intervals))
+                    else:
+                        local_variances.append(0.0)
+                
+                # Use inverse variance as weights
+                weights = 1.0 / (np.array(local_variances) + 1e-6)  # Add small epsilon to avoid division by zero
+                weighted_interval = np.average(beat_intervals, weights=weights)
+                tempo_weighted = 60.0 / weighted_interval if weighted_interval > 0 else 0.0
+                
+                # Combine methods: prefer histogram if it seems reliable, otherwise use median
+                # Check histogram reliability by looking at the peak-to-average ratio
+                if len(valid_intervals) > 0:
+                    peak_to_avg = hist_counts[most_common_bin_idx] / (np.mean(hist_counts) + 1e-6)
+                    if peak_to_avg > 2.0:  # Strong peak in histogram
+                        tempo_value = tempo_from_histogram
+                    else:
+                        # Use weighted average of median and weighted tempo
+                        tempo_value = 0.6 * tempo_from_median + 0.4 * tempo_weighted
+                else:
+                    tempo_value = tempo_from_median
+                
+                # Calculate beat consistency (coefficient of variation)
+                if median_interval > 0:
+                    beat_consistency = 1.0 - (np.std(beat_intervals) / median_interval)
+                    beat_consistency = max(0.0, min(1.0, beat_consistency))  # Clamp between 0 and 1
+                else:
+                    beat_consistency = 0.0
+                
+                # Additional sanity check: if tempo seems unreasonable, fall back to median
+                if tempo_value < 60 or tempo_value > 200:
+                    tempo_value = tempo_from_median
+            else:
+                beat_intervals = np.array([])
+                tempo_value = 0.0
+                beat_consistency = 0
+            
+            # Downbeat tracking with madmom
+            try:
+                downbeat_processor = RNNDownBeatProcessor()
+                downbeat_activations = downbeat_processor(signal)
+                
+                # Track downbeats
+                downbeat_tracker = DBNDownBeatTrackingProcessor(fps=100, beats_per_bar=[4, 3])  # Common time signatures
+                downbeats = downbeat_tracker(downbeat_activations)
+                
+                # Extract downbeat times (first column is time, second is beat number)
+                downbeat_times = downbeats[:, 0] if len(downbeats) > 0 else np.array([])
+                
+                # Extract beat numbers (1-based, where 1 is downbeat)
+                beat_numbers = downbeats[:, 1] if len(downbeats) > 0 else np.array([])
+                
+                # Find just the downbeats (where beat number is 1)
+                downbeat_indices = np.where(beat_numbers == 1)[0]
+                downbeat_times_only = downbeat_times[downbeat_indices] if len(downbeat_indices) > 0 else np.array([])
+                
+            except Exception as e:
+                print(f"Warning: Downbeat detection failed: {e}")
+                downbeat_times_only = np.array([])
+            
+            return MadmomFeatures(
+                beats=beat_times,
+                downbeats=downbeat_times_only,
+                tempo=tempo_value,
+                beat_consistency=beat_consistency,
+                beat_intervals=beat_intervals
+            )
+            
+        except Exception as e:
+            print(f"Error in Madmom beat and downbeat extraction: {e}")
+            return None
 
 
 class DiscogsAnalyzer:
@@ -1115,6 +1264,111 @@ class HeatmapVisualizer:
             print(f"Segmentation visualization saved to {output_path}")
             
         return fig
+    
+    def create_beat_downbeat_visualization(self, audio_path: PathLike,
+                                          essentia_features: EssentiaFeatures,
+                                          madmom_features: MadmomFeatures,
+                                          output_path: Optional[PathLike] = None,
+                                          output_format: str = 'png') -> plt.Figure:
+        """Create a wide visualization of waveform with beats and downbeats marked"""
+        audio_path = mkpath(audio_path)
+        
+        # Set matplotlib parameters to handle large paths
+        plt.rcParams['agg.path.chunksize'] = 10000
+        plt.rcParams['path.simplify_threshold'] = 1.0
+        
+        # Load audio for waveform
+        try:
+            audio, sr = librosa.load(str(audio_path), sr=None)
+            duration = len(audio) / sr
+            time_axis = np.arange(len(audio)) / sr
+        except Exception as e:
+            print(f"Error loading audio for visualization: {e}")
+            return None
+        
+        # Calculate figure width based on duration (wider for longer tracks)
+        # Base width of 20 for 1 minute, add 10 for each additional minute
+        base_width = 20
+        additional_width = max(0, (duration - 60) / 60 * 10)
+        figure_width = min(100, base_width + additional_width)  # Cap at 100 to prevent extremely wide figures
+        
+        # Create a very wide figure
+        fig, ax = plt.subplots(figsize=(figure_width, 6))
+        
+        # Downsample the waveform for visualization if it's too long
+        # Use more points for longer tracks to maintain detail
+        max_points = min(200000, 50000 + duration * 500)  # Scale with duration
+        if len(audio) > max_points:
+            step = int(len(audio) // max_points)
+            step = max(1, step)  # Ensure step is at least 1
+            audio_downsampled = audio[::step]
+            time_axis_downsampled = time_axis[::step]
+        else:
+            audio_downsampled = audio
+            time_axis_downsampled = time_axis
+        
+        # Plot waveform
+        ax.plot(time_axis_downsampled, audio_downsampled, color='gray', alpha=0.7, linewidth=0.5)
+        
+        # Plot Essentia beats
+        if len(essentia_features.beats) > 0:
+            ax.vlines(essentia_features.beats, min(audio_downsampled), max(audio_downsampled),
+                     color='red', alpha=0.8, linestyle='--', linewidth=1,
+                     label=f'Essentia Beats ({len(essentia_features.beats)})')
+        
+        # Plot Madmom beats
+        if len(madmom_features.beats) > 0:
+            ax.vlines(madmom_features.beats, min(audio_downsampled), max(audio_downsampled),
+                     color='orange', alpha=0.6, linestyle=':', linewidth=1,
+                     label=f'Madmom Beats ({len(madmom_features.beats)})')
+        
+        # Plot Madmom downbeats
+        if len(madmom_features.downbeats) > 0:
+            ax.vlines(madmom_features.downbeats, min(audio_downsampled), max(audio_downsampled),
+                     color='blue', alpha=0.9, linestyle='-', linewidth=2,
+                     label=f'Downbeats ({len(madmom_features.downbeats)})')
+        
+        # Formatting
+        ax.set_xlabel('Time (seconds)')
+        ax.set_ylabel('Amplitude')
+        ax.set_title(f'Waveform with Beat and Downbeat Analysis - {audio_path.name}')
+        ax.legend(loc='upper right')
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim(0, duration)
+        
+        # Format x-axis to show time in minutes:seconds for better readability
+        # Add more time ticks for longer tracks
+        num_ticks = min(40, max(10, int(duration/10) + 1))
+        time_ticks = np.linspace(0, duration, num_ticks)
+        time_labels = [f"{int(t/60):.0f}:{int(t%60):.0f}" for t in time_ticks]
+        ax.set_xticks(time_ticks)
+        ax.set_xticklabels(time_labels, rotation=45)
+        
+        plt.tight_layout()
+        
+        if output_path:
+            # Convert to Path object
+            output_path = mkpath(output_path)
+            
+            # Create both PNG and SVG versions if requested
+            if output_format.lower() == 'svg':
+                svg_path = output_path.with_suffix('.svg')
+                plt.savefig(svg_path, format='svg', bbox_inches='tight')
+                print(f"Beat and downbeat visualization saved to {svg_path}")
+            else:
+                # Default to PNG with high DPI
+                plt.savefig(output_path, dpi=300, bbox_inches='tight')
+                print(f"Beat and downbeat visualization saved to {output_path}")
+                
+                # Also create an SVG version for easier zooming
+                svg_path = output_path.with_suffix('.svg')
+                try:
+                    plt.savefig(svg_path, format='svg', bbox_inches='tight')
+                    print(f"Beat and downbeat visualization (SVG) saved to {svg_path}")
+                except Exception as e:
+                    print(f"Could not save SVG version: {e}")
+        
+        return fig
 
 
 class TrackSegmenter:
@@ -1342,7 +1596,7 @@ class TrackSegmenter:
 class ComprehensiveAnalyzer:
     """Main class for comprehensive audio analysis"""
     
-    def __init__(self, enable_discogs: bool = True, discogs_model_path: Optional[str] = None):
+    def __init__(self, enable_discogs: bool = True, discogs_model_path: Optional[str] = None, enable_madmom: bool = True):
         self.essentia_analyzer = EssentiaAnalyzer()
         self.time_analyzer = TimeBasedAnalyzer()
         self.visualizer = HeatmapVisualizer()
@@ -1361,6 +1615,19 @@ class ComprehensiveAnalyzer:
                 self.discogs_analyzer = None
         else:
             self.discogs_analyzer = None
+        
+        # Initialize Madmom analyzer if enabled
+        if enable_madmom and MADMOM_AVAILABLE:
+            try:
+                self.madmom_analyzer = MadmomAnalyzer()
+                print("Madmom beat and downbeat analyzer initialized successfully")
+            except Exception as e:
+                print(f"Failed to initialize Madmom analyzer: {e}")
+                self.madmom_analyzer = None
+        else:
+            if not MADMOM_AVAILABLE:
+                print("Madmom not available. Install with: pip install madmom")
+            self.madmom_analyzer = None
     
     def analyze(self, audio_path: PathLike,
                 original_analysis: Optional[AnalysisResult] = None,
@@ -1388,6 +1655,19 @@ class ComprehensiveAnalyzer:
                     print(f"Detected genres: {', '.join(discogs_info.genres[:3])}")
             except Exception as e:
                 print(f"Error analyzing genre with DiscogsResNet: {e}")
+        
+        # Extract Madmom features (beats and downbeats)
+        madmom_features = None
+        if self.madmom_analyzer:
+            print("Extracting beats and downbeats with Madmom...")
+            try:
+                madmom_features = self.madmom_analyzer.extract_beats_and_downbeats(audio_path)
+                if madmom_features:
+                    print(f"Madmom detected {len(madmom_features.beats)} beats and {len(madmom_features.downbeats)} downbeats")
+                    print(f"Madmom tempo: {madmom_features.tempo:.2f} BPM")
+            except Exception as e:
+                print(f"Error extracting beats and downbeats with Madmom: {e}")
+                madmom_features = None
         
         # Extract time-based features
         print("Extracting time-based features...")
@@ -1425,6 +1705,7 @@ class ComprehensiveAnalyzer:
         result = ComprehensiveAnalysisResult(
             path=audio_path,
             essentia_features=essentia_features,
+            madmom_features=madmom_features,
             discogs_info=discogs_info,
             time_based_features=time_based_features,
             original_analysis=original_analysis,
@@ -1532,6 +1813,13 @@ class ComprehensiveAnalyzer:
             segmentation_path = output_dir / f"{result.path.stem}_segmentation.png"
             self.visualizer.create_segmentation_visualization(result.segmentation_result, segmentation_path)
         
+        # Create beat and downbeat visualization if Madmom features are available
+        if result.madmom_features is not None:
+            beat_downbeat_path = output_dir / f"{result.path.stem}_beats_downbeats.png"
+            self.visualizer.create_beat_downbeat_visualization(
+                result.path, result.essentia_features, result.madmom_features, beat_downbeat_path, output_format='png'
+            )
+        
         print(f"Visualizations saved to {output_dir}")
 
 
@@ -1539,6 +1827,7 @@ def analyze_audio_comprehensive(audio_path: PathLike,
                                output_dir: Optional[PathLike] = None,
                                enable_discogs: bool = True,
                                discogs_model_path: Optional[str] = None,
+                               enable_madmom: bool = True,
                                original_analysis: Optional[AnalysisResult] = None,
                                enable_segmentation: bool = False,
                                segmentation_method: str = 'kmeans',
@@ -1557,6 +1846,8 @@ def analyze_audio_comprehensive(audio_path: PathLike,
         Whether to enable Discogs genre classification (default: True)
     discogs_model_path : str, optional
         Path to the Discogs model file. Required if the model is not in Essentia's installation.
+    enable_madmom : bool, optional
+        Whether to enable Madmom beat and downbeat analysis (default: True)
     original_analysis : AnalysisResult, optional
         Original analysis result from the main allin1 analyzer
     enable_segmentation : bool, optional
@@ -1573,7 +1864,11 @@ def analyze_audio_comprehensive(audio_path: PathLike,
     ComprehensiveAnalysisResult
         Comprehensive analysis results
     """
-    analyzer = ComprehensiveAnalyzer(enable_discogs=enable_discogs, discogs_model_path=discogs_model_path)
+    analyzer = ComprehensiveAnalyzer(
+        enable_discogs=enable_discogs,
+        discogs_model_path=discogs_model_path,
+        enable_madmom=enable_madmom
+    )
     return analyzer.analyze(
         audio_path, original_analysis, output_dir,
         enable_segmentation, segmentation_method, n_clusters, genre_type
@@ -1584,7 +1879,8 @@ def segment_audio_track(audio_path: PathLike,
                        method: str = 'kmeans',
                        n_clusters: int = 4,
                        segment_duration: float = 5.0,
-                       discogs_model_path: Optional[str] = None) -> SegmentationResult:
+                       discogs_model_path: Optional[str] = None,
+                       enable_madmom: bool = True) -> SegmentationResult:
     """
     Convenience function for track segmentation
     
@@ -1600,11 +1896,17 @@ def segment_audio_track(audio_path: PathLike,
         Duration of each segment in seconds (default: 5.0)
     discogs_model_path : str, optional
         Path to the Discogs model file. Required if the model is not in Essentia's installation.
+    enable_madmom : bool, optional
+        Whether to enable Madmom beat and downbeat analysis (default: True)
         
     Returns
     -------
     SegmentationResult
         Segmentation results with cluster information
     """
-    analyzer = ComprehensiveAnalyzer(enable_discogs=True, discogs_model_path=discogs_model_path)
+    analyzer = ComprehensiveAnalyzer(
+        enable_discogs=True,
+        discogs_model_path=discogs_model_path,
+        enable_madmom=enable_madmom
+    )
     return analyzer.segment_track(audio_path, method, n_clusters, segment_duration)

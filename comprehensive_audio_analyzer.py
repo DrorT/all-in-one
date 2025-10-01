@@ -3,7 +3,8 @@
 Comprehensive Audio Analyzer
 
 This script provides a command-line interface for comprehensive audio analysis
-using multiple libraries including Essentia and Discogs genre classification.
+using multiple libraries including Essentia, Madmom for beat and downbeat tracking,
+and Discogs genre classification.
 
 Usage:
     python comprehensive_audio_analyzer.py --input audio_file.wav --output results/
@@ -46,6 +47,12 @@ Examples:
   
   # With primary genre segmentation
   python comprehensive_audio_analyzer.py --input song.wav --output results/ --enable-segmentation --genre-type primary --num-clusters 4
+  
+  # With Madmom beat and downbeat analysis (enabled by default)
+  python comprehensive_audio_analyzer.py --input song.wav --output results/ --enable-madmom
+  
+  # Without Madmom beat and downbeat analysis
+  python comprehensive_audio_analyzer.py --input song.wav --output results/ --disable-madmom
   
   # Complete analysis with all features
   python comprehensive_audio_analyzer.py --input song.wav --output results/ --discogs-model path/to/discogs-effnet-bs64-1.pb --include-original --enable-segmentation --segmentation-method kmeans --num-clusters 4 --genre-type sub --verbose
@@ -116,6 +123,19 @@ Examples:
     )
     
     parser.add_argument(
+        "--enable-madmom",
+        action="store_true",
+        default=True,
+        help="Enable Madmom beat and downbeat analysis (default: True)"
+    )
+    
+    parser.add_argument(
+        "--disable-madmom",
+        action="store_true",
+        help="Disable Madmom beat and downbeat analysis"
+    )
+    
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose output"
@@ -159,6 +179,9 @@ Examples:
             print(f"Error in original analysis: {e}")
             print("Continuing with comprehensive analysis only...")
     
+    # Determine if Madmom should be enabled
+    enable_madmom = args.enable_madmom and not args.disable_madmom
+    
     # Perform comprehensive analysis
     print("\n=== Running Comprehensive Analysis ===")
     try:
@@ -167,6 +190,7 @@ Examples:
             output_dir=output_path,
             original_analysis=original_analysis,
             discogs_model_path=args.discogs_model,
+            enable_madmom=enable_madmom,
             enable_segmentation=args.enable_segmentation,
             segmentation_method=args.segmentation_method,
             n_clusters=args.num_clusters,
@@ -191,6 +215,14 @@ Examples:
     print(f"Acousticness: {comprehensive_result.essentia_features.acousticness:.3f}")
     print(f"Tempo: {comprehensive_result.essentia_features.tempo:.1f} BPM")
     print(f"Key: {comprehensive_result.essentia_features.key} ({'Major' if comprehensive_result.essentia_features.mode == 1 else 'Minor'})")
+    
+    # Print Madmom features if available
+    if comprehensive_result.madmom_features:
+        print("\n--- Madmom Beat and Downbeat Analysis ---")
+        print(f"Tempo: {comprehensive_result.madmom_features.tempo:.1f} BPM")
+        print(f"Beats detected: {len(comprehensive_result.madmom_features.beats)}")
+        print(f"Downbeats detected: {len(comprehensive_result.madmom_features.downbeats)}")
+        print(f"Beat consistency: {comprehensive_result.madmom_features.beat_consistency:.3f}")
     
     if comprehensive_result.discogs_info:
         print("\n--- Discogs Information ---")
@@ -263,6 +295,10 @@ Examples:
     print(f"  - Comprehensive analysis: {output_path / (input_path.stem + '_comprehensive_analysis.json')}")
     print(f"  - Heatmap visualization: {output_path / (input_path.stem + '_heatmap.png')}")
     print(f"  - Timeline visualization: {output_path / (input_path.stem + '_timeline.png')}")
+    
+    if comprehensive_result.madmom_features:
+        print(f"  - Beat and downbeat visualization: {output_path / (input_path.stem + '_beats_downbeats.png')}")
+        print(f"  - Beat and downbeat visualization (SVG): {output_path / (input_path.stem + '_beats_downbeats.svg')}")
     
     if comprehensive_result.segmentation_result:
         print(f"  - Segmentation visualization: {output_path / (input_path.stem + '_segmentation.png')}")

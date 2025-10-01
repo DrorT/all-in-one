@@ -108,7 +108,6 @@ class EssentiaFeatures:
     valence: float
     acousticness: float
     instrumentalness: float
-    tempo: float
     key: int
     mode: int
     time_signature: int
@@ -119,7 +118,6 @@ class EssentiaFeatures:
     mfcc: np.ndarray
     chroma: np.ndarray
     tonal: Dict[str, float]
-    beats: np.ndarray
 
 
 @dataclass
@@ -187,7 +185,6 @@ class EssentiaAnalyzer:
         self.loudness = es.Loudness()
         self.energy = es.Energy()
         self.key_extractor = es.KeyExtractor()
-        self.rhythmextractor2013 = es.RhythmExtractor2013()
         self.zcr = es.ZeroCrossingRate()
         self.tonal = es.TonalExtractor()
         self._tonal_output_names = self.tonal.outputNames()
@@ -224,18 +221,6 @@ class EssentiaAnalyzer:
             tonal_raw = self.tonal(audio)
             tonal_features = self._format_tonal_output(tonal_raw)
             
-            # Extract rhythm features
-            rhythm_output = self.rhythmextractor2013(audio)
-            if isinstance(rhythm_output, tuple):
-                tempo = float(rhythm_output[0])
-                beats = np.array(rhythm_output[1]) if len(rhythm_output) > 1 else np.array([])
-                rhythm_confidence = float(rhythm_output[2]) if len(rhythm_output) > 2 else 0.0
-            else:
-                tempo = float(rhythm_output)
-                beats = np.array([])
-                rhythm_confidence = 0.0
-            tonal_features.setdefault('rhythm_confidence', rhythm_confidence)
-            
             # Extract spectral features
             zcr_values = self.zcr(audio)
             if isinstance(zcr_values, np.ndarray):
@@ -267,8 +252,8 @@ class EssentiaAnalyzer:
                                                       zero_crossing_rate=zcr_mean)
             instrumentalness = self._estimate_instrumentalness(audio)
             
-            # Extract time signature (simplified)
-            time_signature = self._estimate_time_signature(beats, tempo)
+            # Extract time signature (simplified) - using default value
+            time_signature = 4  # Default to 4/4
             
             return EssentiaFeatures(
                 danceability=danceability_value,
@@ -277,7 +262,6 @@ class EssentiaAnalyzer:
                 valence=valence,
                 acousticness=acousticness,
                 instrumentalness=instrumentalness,
-                tempo=tempo,
                 key=key,
                 mode=scale,  # 0 for minor, 1 for major
                 time_signature=time_signature,
@@ -287,8 +271,7 @@ class EssentiaAnalyzer:
                 zero_crossing_rate=zcr_mean,
                 mfcc=mfcc_coeffs,
                 chroma=chroma_features,
-                tonal=tonal_features,
-                beats=beats
+                tonal=tonal_features
             )
         except Exception as e:
             print(f"Error in Essentia feature extraction: {e}")
@@ -300,7 +283,6 @@ class EssentiaAnalyzer:
                 valence=0.5,
                 acousticness=0.5,
                 instrumentalness=0.5,
-                tempo=120.0,
                 key=0,
                 mode=0,
                 time_signature=4,
@@ -310,8 +292,7 @@ class EssentiaAnalyzer:
                 zero_crossing_rate=0.5,
                 mfcc=np.zeros((13, 100)),  # Default MFCC shape
                 chroma=np.zeros((12, 100)),  # Default chroma shape
-                tonal={},
-                beats=np.array([])  # Empty beat array
+                tonal={}
             )
     
     def _format_tonal_output(self, tonal_raw: Union[Dict, Tuple, List]) -> Dict[str, Any]:
@@ -386,25 +367,6 @@ class EssentiaAnalyzer:
         # Lower variance might indicate instrumental music
         return float(np.clip(1.0 - np.mean(spectral_variance) / 1000, 0, 1))
     
-    def _estimate_time_signature(self, beats: np.ndarray, tempo: float) -> int:
-        """Estimate time signature from beat patterns"""
-        if len(beats) < 4:
-            return 4  # Default to 4/4
-        
-        # Calculate beat intervals
-        intervals = np.diff(beats)
-        if len(intervals) == 0:
-            return 4
-            
-        # Simple heuristic based on tempo and beat regularity
-        regularity = 1.0 - np.std(intervals) / np.mean(intervals)
-        
-        if tempo > 120 and regularity > 0.8:
-            return 4  # Likely 4/4
-        elif tempo < 100 and regularity > 0.7:
-            return 3  # Possibly 3/4
-        else:
-            return 4  # Default to 4/4
 
 
 class MadmomAnalyzer:
@@ -823,7 +785,6 @@ class TimeBasedAnalyzer:
             'danceability': [],
             'energy': [],
             'valence': [],
-            'tempo': [],
             'spectral_centroid': [],
             'spectral_rolloff': [],
             'spectral_bandwidth': [],
@@ -860,7 +821,6 @@ class TimeBasedAnalyzer:
                 features['danceability'].append(segment_features.danceability)
                 features['energy'].append(segment_features.energy)
                 features['valence'].append(segment_features.valence)
-                features['tempo'].append(segment_features.tempo)
                 features['spectral_centroid'].append(segment_features.spectral_centroid)
                 features['spectral_rolloff'].append(segment_features.spectral_rolloff)
                 features['spectral_bandwidth'].append(segment_features.spectral_bandwidth)
@@ -1113,7 +1073,7 @@ class HeatmapVisualizer:
         time_stamps = time_based_features.time_stamps
         
         # Select key features for timeline
-        key_features = ['danceability', 'energy', 'valence', 'tempo']
+        key_features = ['danceability', 'energy', 'valence']
         available_features = [f for f in key_features if f in features and len(features[f]) > 0]
         
         if not available_features:
@@ -1266,7 +1226,6 @@ class HeatmapVisualizer:
         return fig
     
     def create_beat_downbeat_visualization(self, audio_path: PathLike,
-                                          essentia_features: EssentiaFeatures,
                                           madmom_features: MadmomFeatures,
                                           output_path: Optional[PathLike] = None,
                                           output_format: str = 'png') -> plt.Figure:
@@ -1309,12 +1268,6 @@ class HeatmapVisualizer:
         
         # Plot waveform
         ax.plot(time_axis_downsampled, audio_downsampled, color='gray', alpha=0.7, linewidth=0.5)
-        
-        # Plot Essentia beats
-        if len(essentia_features.beats) > 0:
-            ax.vlines(essentia_features.beats, min(audio_downsampled), max(audio_downsampled),
-                     color='red', alpha=0.8, linestyle='--', linewidth=1,
-                     label=f'Essentia Beats ({len(essentia_features.beats)})')
         
         # Plot Madmom beats
         if len(madmom_features.beats) > 0:
@@ -1453,7 +1406,7 @@ class TrackSegmenter:
         
         # Select scalar features (exclude 2D arrays)
         scalar_features = [
-            'danceability', 'energy', 'valence', 'tempo',
+            'danceability', 'energy', 'valence',
             'spectral_centroid', 'spectral_rolloff', 'spectral_bandwidth',
             'zero_crossing_rate'
         ]
@@ -1817,7 +1770,7 @@ class ComprehensiveAnalyzer:
         if result.madmom_features is not None:
             beat_downbeat_path = output_dir / f"{result.path.stem}_beats_downbeats.png"
             self.visualizer.create_beat_downbeat_visualization(
-                result.path, result.essentia_features, result.madmom_features, beat_downbeat_path, output_format='png'
+                result.path, result.madmom_features, beat_downbeat_path, output_format='png'
             )
         
         print(f"Visualizations saved to {output_dir}")

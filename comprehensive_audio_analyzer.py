@@ -213,7 +213,6 @@ Examples:
     print(f"Energy: {comprehensive_result.essentia_features.energy:.3f}")
     print(f"Valence: {comprehensive_result.essentia_features.valence:.3f}")
     print(f"Acousticness: {comprehensive_result.essentia_features.acousticness:.3f}")
-    print(f"Tempo: {comprehensive_result.essentia_features.tempo:.1f} BPM")
     print(f"Key: {comprehensive_result.essentia_features.key} ({'Major' if comprehensive_result.essentia_features.mode == 1 else 'Minor'})")
     
     # Print Madmom features if available

@@ -40,7 +40,6 @@ dependencies = [
   "python-multipart",
   "httpx",
   "essentia-tensorflow",
-  "musicnn",
   "discogs-client",
   "seaborn",
   "pandas",

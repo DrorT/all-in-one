@@ -48,7 +48,6 @@ def test_imports():
     try:
         from allin1.comprehensive_analysis import (
             EssentiaAnalyzer, 
-            MusicNNAnalyzer, 
             DiscogsAnalyzer, 
             TimeBasedAnalyzer,
             HeatmapVisualizer,
@@ -95,41 +94,6 @@ def test_essentia_analyzer():
         
     except Exception as e:
         print(f"✗ Essentia analyzer test failed: {e}")
-        return False
-
-def test_musicnn_analyzer():
-    """Test the MusicNN analyzer"""
-    print("\nTesting MusicNN analyzer...")
-    
-    try:
-        from allin1.comprehensive_analysis import MusicNNAnalyzer
-        
-        # Create test audio
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
-            test_file = create_test_audio(duration=5, filename=tmp.name)
-        
-        # Test analysis
-        analyzer = MusicNNAnalyzer()
-        tags = analyzer.extract_tags(test_file)
-        
-        # Check that we got some tags
-        assert len(tags.tags) > 0, "Should have extracted some tags"
-        assert len(tags.top_tags) > 0, "Should have some top tags"
-        
-        print("✓ MusicNN analyzer test passed")
-        print("  Top 5 tags:")
-        for tag, score in tags.top_tags[:5]:
-            print(f"    {tag}: {score:.3f}")
-        
-        # Clean up
-        os.unlink(test_file)
-        return True
-        
-    except ImportError:
-        print("⚠ MusicNN not available, skipping test")
-        return True
-    except Exception as e:
-        print(f"✗ MusicNN analyzer test failed: {e}")
         return False
 
 def test_time_based_analyzer():
@@ -256,7 +220,6 @@ def main():
     tests = [
         test_imports,
         test_essentia_analyzer,
-        test_musicnn_analyzer,
         test_time_based_analyzer,
         test_visualizer,
         test_comprehensive_analyzer

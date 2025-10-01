@@ -3,7 +3,6 @@ Comprehensive Audio Analysis Module
 
 This module provides advanced audio analysis capabilities using multiple libraries:
 - Essentia for musical feature extraction
-- MusicNN for tag-based analysis
 - Discogs for genre information
 - Time-based feature analysis with heatmap visualization
 """
@@ -46,26 +45,6 @@ KEY_TO_INT = {
 }
 
 # Try to import optional dependencies
-musicnn_top_tags = None
-try:
-    from musicnn.tagger import top_tags as _musicnn_top_tags
-    import keras
-
-    keras_version = getattr(keras, "__version__", "0")
-    try:
-        keras_major = int(str(keras_version).split('.')[0])
-    except (ValueError, TypeError):
-        keras_major = 0
-
-    if keras_major >= 3:
-        MUSICNN_AVAILABLE = False
-        print("MusicNN disabled: keras>=3 is not supported. Install tensorflow<=2.13 and keras<3 to enable MusicNN tags.")
-    else:
-        MUSICNN_AVAILABLE = True
-        musicnn_top_tags = _musicnn_top_tags
-except ImportError:
-    MUSICNN_AVAILABLE = False
-    print("MusicNN not available. Install with: pip install musicnn tensorflow<2.14 keras<3")
 
 try:
     import discogs_client
@@ -117,13 +96,6 @@ class EssentiaFeatures:
 
 
 @dataclass
-class MusicNNTags:
-    """Data class for MusicNN extracted tags"""
-    tags: Dict[str, float]
-    top_tags: List[Tuple[str, float]]
-
-
-@dataclass
 class DiscogsInfo:
     """Data class for Discogs genre information"""
     genres: List[str]
@@ -146,7 +118,6 @@ class ComprehensiveAnalysisResult:
     """Data class for comprehensive analysis results"""
     path: Path
     essentia_features: EssentiaFeatures
-    musicnn_tags: Optional[MusicNNTags]
     discogs_info: Optional[DiscogsInfo]
     time_based_features: TimeBasedFeatures
     original_analysis: Optional[AnalysisResult] = None
@@ -380,26 +351,6 @@ class EssentiaAnalyzer:
             return 3  # Possibly 3/4
         else:
             return 4  # Default to 4/4
-
-
-class MusicNNAnalyzer:
-    """Class for extracting tags using MusicNN"""
-    
-    def __init__(self, model: str = 'MTT_musicnn'):
-        if not MUSICNN_AVAILABLE or musicnn_top_tags is None:
-            raise ImportError("MusicNN is not available. Install with: pip install musicnn tensorflow<=2.13 keras<3")
-        self.model = model
-        
-    def extract_tags(self, audio_path: PathLike) -> MusicNNTags:
-        """Extract tags using MusicNN"""
-        audio_path = mkpath(audio_path)
-        
-        # Extract tags using MusicNN top_tags helper (returns ordered names and scores)
-        tag_names, tag_scores = musicnn_top_tags(str(audio_path), model=self.model, topN=50)
-        tags = {name: float(score) for name, score in zip(tag_names, tag_scores)}
-        top_tags = list(zip(tag_names[:10], [float(s) for s in tag_scores[:10]]))
-
-        return MusicNNTags(tags=tags, top_tags=top_tags)
 
 
 class DiscogsAnalyzer:
@@ -655,11 +606,6 @@ class ComprehensiveAnalyzer:
         self.essentia_analyzer = EssentiaAnalyzer()
         self.time_analyzer = TimeBasedAnalyzer()
         self.visualizer = HeatmapVisualizer()
-        
-        if MUSICNN_AVAILABLE:
-            self.musicnn_analyzer = MusicNNAnalyzer()
-        else:
-            self.musicnn_analyzer = None
             
         if DISCOGS_AVAILABLE and discogs_token:
             self.discogs_analyzer = DiscogsAnalyzer(discogs_token)
@@ -678,15 +624,6 @@ class ComprehensiveAnalyzer:
         print("Extracting Essentia features...")
         essentia_features = self.essentia_analyzer.extract_features(audio_path)
         
-        # Extract MusicNN tags if available
-        musicnn_tags = None
-        if self.musicnn_analyzer:
-            print("Extracting MusicNN tags...")
-            try:
-                musicnn_tags = self.musicnn_analyzer.extract_tags(audio_path)
-            except Exception as e:
-                print(f"Error extracting MusicNN tags: {e}")
-        
         # Get Discogs info if available
         discogs_info = None
         if self.discogs_analyzer:
@@ -704,7 +641,6 @@ class ComprehensiveAnalyzer:
         result = ComprehensiveAnalysisResult(
             path=audio_path,
             essentia_features=essentia_features,
-            musicnn_tags=musicnn_tags,
             discogs_info=discogs_info,
             time_based_features=time_based_features,
             original_analysis=original_analysis

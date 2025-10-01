@@ -3,7 +3,7 @@
 Comprehensive Audio Analyzer
 
 This script provides a command-line interface for comprehensive audio analysis
-using multiple libraries including Essentia, MusicNN, and Discogs.
+using multiple libraries including Essentia and Discogs.
 
 Usage:
     python comprehensive_audio_analyzer.py --input audio_file.wav --output results/
@@ -146,11 +146,6 @@ Examples:
     print(f"Acousticness: {comprehensive_result.essentia_features.acousticness:.3f}")
     print(f"Tempo: {comprehensive_result.essentia_features.tempo:.1f} BPM")
     print(f"Key: {comprehensive_result.essentia_features.key} ({'Major' if comprehensive_result.essentia_features.mode == 1 else 'Minor'})")
-    
-    if comprehensive_result.musicnn_tags:
-        print("\n--- MusicNN Top Tags ---")
-        for tag, score in comprehensive_result.musicnn_tags.top_tags[:5]:
-            print(f"{tag}: {score:.3f}")
     
     if comprehensive_result.discogs_info:
         print("\n--- Discogs Information ---")

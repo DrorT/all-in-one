@@ -3,11 +3,11 @@
 Comprehensive Audio Analyzer
 
 This script provides a command-line interface for comprehensive audio analysis
-using multiple libraries including Essentia and Discogs.
+using multiple libraries including Essentia and Discogs genre classification.
 
 Usage:
     python comprehensive_audio_analyzer.py --input audio_file.wav --output results/
-    python comprehensive_audio_analyzer.py --input audio_file.wav --output results/ --discogs-token YOUR_TOKEN
+    python comprehensive_audio_analyzer.py --input audio_file.wav --output results/
 """
 
 import argparse
@@ -25,18 +25,21 @@ from allin1.comprehensive_analysis import analyze_audio_comprehensive
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Comprehensive Audio Analyzer - Extract musical features, tags, and genre information",
+        description="Comprehensive Audio Analyzer - Extract musical features, tags, and genre classification",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Basic analysis
   python comprehensive_audio_analyzer.py --input song.wav --output results/
   
-  # With Discogs genre information
-  python comprehensive_audio_analyzer.py --input song.wav --output results/ --discogs-token YOUR_TOKEN
+  # With Discogs genre classification (requires model file)
+  python comprehensive_audio_analyzer.py --input song.wav --output results/ --discogs-model path/to/discogs-effnet-bs64-1.pb
   
   # Including original allin1 analysis
   python comprehensive_audio_analyzer.py --input song.wav --output results/ --include-original
+  
+  # Complete analysis with all features
+  python comprehensive_audio_analyzer.py --input song.wav --output results/ --discogs-model path/to/discogs-effnet-bs64-1.pb --include-original --verbose
         """
     )
     
@@ -55,10 +58,10 @@ Examples:
     )
     
     parser.add_argument(
-        "--discogs-token", "-dt",
+        "--discogs-model", "-dm",
         type=str,
         default=None,
-        help="Discogs API token for genre information (get from https://www.discogs.com/settings/developers)"
+        help="Path to the Discogs genre classification model file (discogs-effnet-bs64-1.pb)"
     )
     
     parser.add_argument(
@@ -124,8 +127,8 @@ Examples:
         comprehensive_result = analyze_audio_comprehensive(
             audio_path=input_path,
             output_dir=output_path,
-            discogs_token=args.discogs_token,
-            original_analysis=original_analysis
+            original_analysis=original_analysis,
+            discogs_model_path=args.discogs_model
         )
         
         if args.verbose:

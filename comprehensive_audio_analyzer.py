@@ -117,8 +117,15 @@ Examples:
     parser.add_argument(
         "--num-clusters", "-nc",
         type=int,
-        default=4,
-        help="Number of clusters for segmentation methods that require it (default: 4)"
+        default=8,
+        help="Number of clusters for segmentation methods that require it (default: 8)"
+    )
+    
+    parser.add_argument(
+        "--similarity-threshold", "-st",
+        type=float,
+        default=0.30,
+        help="Threshold for grouping similar consecutive segments (0.0-1.0, lower=stricter, default: 0.30)"
     )
     
     parser.add_argument(
@@ -204,6 +211,7 @@ Examples:
             enable_segmentation=enable_segmentation,
             segmentation_method=args.segmentation_method,
             n_clusters=args.num_clusters,
+            similarity_threshold=args.similarity_threshold,
             genre_type=args.genre_type
         )
         

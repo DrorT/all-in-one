@@ -188,7 +188,7 @@ class GroupedSegmentationResult:
 
 def group_similar_segments(segments: List[SegmentInfo],
                           feature_names: List[str],
-                          similarity_threshold: float = 0.15) -> GroupedSegmentationResult:
+                          similarity_threshold: float = 0.30) -> GroupedSegmentationResult:
     """
     Group consecutive segments with similar features.
     
@@ -200,7 +200,7 @@ def group_similar_segments(segments: List[SegmentInfo],
         Names of features to use for similarity calculation
     similarity_threshold : float, optional
         Maximum normalized difference between features to consider segments similar.
-        Lower values mean stricter similarity. Default: 0.15
+        Lower values mean stricter similarity. Default: 0.30
         
     Returns
     -------
@@ -1687,7 +1687,7 @@ class HeatmapVisualizer:
 class TrackSegmenter:
     """Class for segmenting tracks based on feature similarity"""
     
-    def __init__(self, method: str = 'kmeans', n_clusters: int = 4,
+    def __init__(self, method: str = 'kmeans', n_clusters: int = 8,
                  include_genre: bool = True, genre_type: str = 'sub', scaler: str = 'standard'):
         """
         Initialize the track segmenter
@@ -1697,7 +1697,7 @@ class TrackSegmenter:
         method : str, optional
             Clustering method ('kmeans', 'dbscan', 'hierarchical') (default: 'kmeans')
         n_clusters : int, optional
-            Number of clusters for methods that require it (default: 4)
+            Number of clusters for methods that require it (default: 8)
         include_genre : bool, optional
             Whether to include genre features in clustering (default: True)
         genre_type : str, optional
@@ -1952,7 +1952,8 @@ class ComprehensiveAnalyzer:
                 output_dir: Optional[PathLike] = None,
                 enable_segmentation: bool = False,
                 segmentation_method: str = 'kmeans',
-                n_clusters: int = 4,
+                n_clusters: int = 8,
+                similarity_threshold: float = 0.30,
                 genre_type: str = 'sub') -> ComprehensiveAnalysisResult:
         """Perform comprehensive analysis on an audio file"""
         audio_path = mkpath(audio_path)
@@ -2021,7 +2022,7 @@ class ComprehensiveAnalyzer:
                 grouped_segmentation = group_similar_segments(
                     segmentation_result.segments,
                     segmentation_result.feature_names,
-                    similarity_threshold=0.15
+                    similarity_threshold=similarity_threshold
                 )
                 print(f"Grouped {len(segmentation_result.segments)} segments into {grouped_segmentation.num_groups} groups")
                     
@@ -2161,7 +2162,8 @@ def analyze_audio_comprehensive(audio_path: PathLike,
                                original_analysis: Optional[AnalysisResult] = None,
                                enable_segmentation: bool = False,
                                segmentation_method: str = 'kmeans',
-                               n_clusters: int = 4,
+                               n_clusters: int = 8,
+                               similarity_threshold: float = 0.30,
                                genre_type: str = 'sub') -> ComprehensiveAnalysisResult:
     """
     Convenience function for comprehensive audio analysis
@@ -2201,7 +2203,7 @@ def analyze_audio_comprehensive(audio_path: PathLike,
     )
     return analyzer.analyze(
         audio_path, original_analysis, output_dir,
-        enable_segmentation, segmentation_method, n_clusters, genre_type
+        enable_segmentation, segmentation_method, n_clusters, similarity_threshold, genre_type
     )
 
 

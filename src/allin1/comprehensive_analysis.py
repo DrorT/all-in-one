@@ -777,12 +777,16 @@ class DiscogsAnalyzer:
                     else:
                         avg_predictions = pred_array
                     
+                    # Apply softmax to convert logits to probabilities
+                    exp_pred = np.exp(avg_predictions - np.max(avg_predictions))
+                    probabilities = exp_pred / np.sum(exp_pred)
+                    
                     # Debug information
-                    print(f"Prediction shape: {avg_predictions.shape}")
+                    print(f"Prediction shape: {probabilities.shape}")
                     print(f"Number of genre labels: {len(self.genre_labels)}")
                     
                     # Get top genres by probability
-                    sorted_indices = np.argsort(avg_predictions)[::-1]
+                    sorted_indices = np.argsort(probabilities)[::-1]
                     
                     # Make sure we don't exceed the number of labels
                     num_genres = min(len(sorted_indices), len(self.genre_labels))
@@ -847,6 +851,12 @@ class DiscogsAnalyzer:
                 # Skip very short segments
                 if len(segment_audio) < segment_samples * 0.5:
                     continue
+                
+                # Pad to minimum 3 seconds if needed (model requires 3-second patches)
+                min_samples = int(3.0 * 16000)  # 3 seconds at 16kHz
+                if len(segment_audio) < min_samples:
+                    # Pad with zeros at the end
+                    segment_audio = np.pad(segment_audio, (0, min_samples - len(segment_audio)), mode='constant')
                 
                 # Get predictions for this segment
                 predictions = self.discogs_classifier(segment_audio)
@@ -1148,34 +1158,46 @@ class TimeBasedAnalyzer:
                     
                     segment_audio = audio[start_sample:end_sample]
                     
-                    # Save segment to temporary file
-                    temp_path = f"temp_genre_segment.wav"
-                    import soundfile as sf
-                    sf.write(temp_path, segment_audio, sr)
+                    # Resample to 16kHz for Discogs model
+                    segment_audio_16k = librosa.resample(segment_audio, orig_sr=sr, target_sr=16000)
+                    
+                    # Pad to minimum 3 seconds if needed (model requires 3-second patches)
+                    min_samples = int(3.0 * 16000)  # 3 seconds at 16kHz
+                    if len(segment_audio_16k) < min_samples:
+                        # Pad with zeros at the end
+                        segment_audio_16k = np.pad(segment_audio_16k, (0, min_samples - len(segment_audio_16k)), mode='constant')
                     
                     try:
-                        # Get genre predictions for this segment
-                        genre_info = discogs_analyzer.analyze_genre(temp_path)
-                        if genre_info and genre_info.genres:
-                            # Extract probabilities from genre names (format: "genre---subgenre")
-                            # For now, we'll create a one-hot-like representation
-                            # In practice, you may want to store the actual probabilities
-                            genre_vector = np.zeros(len(discogs_analyzer.genre_labels))
-                            # Simple approach: mark top genres
-                            for genre in genre_info.genres[:3]:  # Top 3 genres
-                                if genre in discogs_analyzer.genre_labels:
-                                    idx = discogs_analyzer.genre_labels.index(genre)
-                                    genre_vector[idx] = 1.0
-                            genre_predictions_list.append(genre_vector)
+                        # Get genre predictions directly from the classifier
+                        predictions = discogs_analyzer.discogs_classifier(segment_audio_16k)
+                        
+                        if predictions is not None:
+                            # Convert to numpy array
+                            pred_array = np.array(predictions)
+                            
+                            # Average predictions across frames if needed
+                            if pred_array.ndim > 1:
+                                avg_predictions = np.mean(pred_array, axis=0)
+                            else:
+                                avg_predictions = pred_array
+                            
+                            # Apply softmax to convert logits to probabilities
+                            # Softmax: exp(x) / sum(exp(x))
+                            exp_pred = np.exp(avg_predictions - np.max(avg_predictions))  # Subtract max for numerical stability
+                            probabilities = exp_pred / np.sum(exp_pred)
+                            
+                            # Ensure we have the right number of predictions
+                            if len(probabilities) == len(discogs_analyzer.genre_labels):
+                                genre_predictions_list.append(probabilities)
+                            else:
+                                print(f"Warning: Prediction size mismatch for segment at {start_time:.2f}s")
+                                genre_predictions_list.append(np.zeros(len(discogs_analyzer.genre_labels)))
                         else:
-                            # No genre detected, use zeros
+                            # No predictions, use zeros
                             genre_predictions_list.append(np.zeros(len(discogs_analyzer.genre_labels)))
                     except Exception as e:
-                        print(f"Error analyzing genre for segment: {e}")
+                        print(f"Error analyzing genre for segment at {start_time:.2f}s: {e}")
                         genre_predictions_list.append(np.zeros(len(discogs_analyzer.genre_labels)))
-                    finally:
-                        if os.path.exists(temp_path):
-                            os.remove(temp_path)
                 
                 if genre_predictions_list:
                     time_features.genre_predictions = np.array(genre_predictions_list)

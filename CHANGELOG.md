@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Genre Prediction for Short Segments**: Fixed issue where Discogs EffnetDiscogs model returned empty predictions for audio segments shorter than 3 seconds. Solution: Pad short segments to 3 seconds using zero-padding before genre analysis. This ensures all downbeat-based segments (typically 1.7-2.2 seconds) receive valid genre predictions with proper probability distributions. (2025-10-01)
+
 ## [1.1.0] - 2023-10-10
 
 ### Added

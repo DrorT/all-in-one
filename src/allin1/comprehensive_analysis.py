@@ -1544,6 +1544,706 @@ class TrackSegmenter:
             clustering_method=self.method,
             silhouette_score=silhouette
         )
+    
+    def segment_by_downbeats(self, audio_path: PathLike, madmom_features: MadmomFeatures,
+                           segment_group_sizes: List[int] = [1, 2, 4, 8]) -> Dict[str, Any]:
+        """
+        Segment track based on downbeats from madmom
+        
+        Parameters
+        ----------
+        audio_path : PathLike
+            Path to the audio file
+        madmom_features : MadmomFeatures
+            Madmom features containing downbeats
+        segment_group_sizes : List[int], optional
+            List of segment group sizes to analyze (default: [1, 2, 4, 8])
+            
+        Returns
+        -------
+        Dict[str, Any]
+            Dictionary containing segmentation results and analysis
+        """
+        audio_path = mkpath(audio_path)
+        
+        # Load audio to get total duration
+        try:
+            audio, sr = librosa.load(str(audio_path), sr=None)
+            total_duration = len(audio) / sr
+        except Exception as e:
+            print(f"Error loading audio: {e}")
+            return {"error": str(e)}
+        
+        # Get downbeats
+        downbeats = madmom_features.downbeats
+        
+        if len(downbeats) == 0:
+            return {"error": "No downbeats found"}
+        
+        # Create segments based on downbeats
+        segments = []
+        
+        # Handle first segment
+        if len(downbeats) > 0:
+            first_downbeat = downbeats[0]
+            if first_downbeat < 0.3:
+                # If first downbeat is less than 0.3 sec, start from time 0
+                segments.append({
+                    "start_time": 0.0,
+                    "end_time": first_downbeat,
+                    "segment_id": 0,
+                    "is_special": True
+                })
+            else:
+                # Include audio before first downbeat
+                segments.append({
+                    "start_time": 0.0,
+                    "end_time": first_downbeat,
+                    "segment_id": 0,
+                    "is_special": False
+                })
+        
+        # Create segments between downbeats
+        for i in range(len(downbeats) - 1):
+            segments.append({
+                "start_time": downbeats[i],
+                "end_time": downbeats[i + 1],
+                "segment_id": i + 1,
+                "is_special": False
+            })
+        
+        # Handle last segment
+        if len(downbeats) > 0:
+            last_downbeat = downbeats[-1]
+            time_since_last = total_duration - last_downbeat
+            
+            if time_since_last < 0.3:
+                # If last downbeat is less than 0.3 seconds from end, connect to previous segment
+                if len(segments) > 0:
+                    segments[-1]["end_time"] = total_duration
+                    segments[-1]["is_special"] = True
+            else:
+                # Create final segment
+                segments.append({
+                    "start_time": last_downbeat,
+                    "end_time": total_duration,
+                    "segment_id": len(segments),
+                    "is_special": False
+                })
+        
+        # Extract features for each segment
+        essentia_analyzer = EssentiaAnalyzer()
+        
+        for segment in segments:
+            try:
+                # Extract audio segment
+                start_sample = int(segment["start_time"] * sr)
+                end_sample = int(segment["end_time"] * sr)
+                segment_audio = audio[start_sample:end_sample]
+                
+                # Save segment to temporary file
+                temp_path = f"temp_downbeat_segment_{segment['segment_id']}.wav"
+                import soundfile as sf
+                sf.write(temp_path, segment_audio, sr)
+                
+                # Extract features
+                features = essentia_analyzer.extract_features(temp_path)
+                
+                # Store key features as a dictionary
+                segment["features"] = {
+                    "danceability": features.danceability,
+                    "energy": features.energy,
+                    "valence": features.valence,
+                    "loudness": features.loudness,
+                    "acousticness": features.acousticness,
+                    "instrumentalness": features.instrumentalness,
+                    "key": features.key,
+                    "mode": features.mode,
+                    "spectral_centroid": features.spectral_centroid,
+                    "spectral_rolloff": features.spectral_rolloff,
+                    "spectral_bandwidth": features.spectral_bandwidth,
+                    "zero_crossing_rate": features.zero_crossing_rate
+                }
+                
+                # Clean up temporary file
+                os.remove(temp_path)
+                
+            except Exception as e:
+                print(f"Error processing segment {segment['segment_id']}: {e}")
+                # Set default features if extraction fails
+                segment["features"] = {
+                    "danceability": 0.5,
+                    "energy": 0.5,
+                    "valence": 0.5,
+                    "loudness": 0.5,
+                    "acousticness": 0.5,
+                    "instrumentalness": 0.5,
+                    "key": 0,
+                    "mode": 0,
+                    "spectral_centroid": 0.5,
+                    "spectral_rolloff": 0.5,
+                    "spectral_bandwidth": 0.5,
+                    "zero_crossing_rate": 0.5
+                }
+        
+        # Analyze segment groups
+        segment_groups = {}
+        
+        for group_size in segment_group_sizes:
+            groups = []
+            
+            # Group segments into chunks of the specified size
+            for i in range(0, len(segments), group_size):
+                group_segments = segments[i:i + group_size]
+                
+                # Calculate average features for this group
+                if group_segments:
+                    avg_features = {}
+                    for feature_name in group_segments[0]["features"].keys():
+                        feature_values = [s["features"][feature_name] for s in group_segments]
+                        avg_features[feature_name] = np.mean(feature_values)
+                    
+                    groups.append({
+                        "group_id": len(groups),
+                        "segment_indices": [s["segment_id"] for s in group_segments],
+                        "start_time": group_segments[0]["start_time"],
+                        "end_time": group_segments[-1]["end_time"],
+                        "num_segments": len(group_segments),
+                        "avg_features": avg_features
+                    })
+            
+            segment_groups[f"groups_of_{group_size}"] = groups
+        
+        # Calculate similarities between groups of the same size
+        similarity_results = {}
+        
+        for group_size, groups in segment_groups.items():
+            if len(groups) < 2:
+                continue
+                
+            # Create feature matrix for similarity calculation
+            feature_matrix = []
+            for group in groups:
+                feature_vector = list(group["avg_features"].values())
+                feature_matrix.append(feature_vector)
+            
+            feature_matrix = np.array(feature_matrix)
+            
+            # Normalize features
+            scaler = StandardScaler()
+            normalized_features = scaler.fit_transform(feature_matrix)
+            
+            # Calculate pairwise similarities
+            similarities = np.corrcoef(normalized_features)
+            
+            # Find most similar pairs
+            most_similar_pairs = []
+            for i in range(len(groups)):
+                for j in range(i + 1, len(groups)):
+                    similarity_score = similarities[i, j]
+                    most_similar_pairs.append({
+                        "group1_id": i,
+                        "group2_id": j,
+                        "similarity": similarity_score,
+                        "group1_start": groups[i]["start_time"],
+                        "group1_end": groups[i]["end_time"],
+                        "group2_start": groups[j]["start_time"],
+                        "group2_end": groups[j]["end_time"]
+                    })
+            
+            # Sort by similarity (descending)
+            most_similar_pairs.sort(key=lambda x: x["similarity"], reverse=True)
+            
+            similarity_results[group_size] = {
+                "most_similar_pairs": most_similar_pairs[:5],  # Top 5 pairs
+                "similarity_matrix": similarities.tolist()
+            }
+        
+        return {
+            "segments": segments,
+            "segment_groups": segment_groups,
+            "similarities": similarity_results,
+            "total_duration": total_duration,
+            "num_downbeats": len(downbeats),
+            "downbeat_times": downbeats.tolist()
+        }
+    
+    def segment_by_similarity(self, audio_path: PathLike, madmom_features: MadmomFeatures,
+                            similarity_threshold: float = 0.85) -> Dict[str, Any]:
+        """
+        Create segments based on downbeats and group them by similarity
+        
+        Parameters
+        ----------
+        audio_path : PathLike
+            Path to the audio file
+        madmom_features : MadmomFeatures
+            Madmom features containing downbeats
+        similarity_threshold : float, optional
+            Minimum similarity score for segments to be grouped (default: 0.85)
+            
+        Returns
+        -------
+        Dict[str, Any]
+            Dictionary containing segmentation results and similarity-based groups
+        """
+        audio_path = mkpath(audio_path)
+        
+        # Load audio to get total duration
+        try:
+            audio, sr = librosa.load(str(audio_path), sr=None)
+            total_duration = len(audio) / sr
+        except Exception as e:
+            print(f"Error loading audio: {e}")
+            return {"error": str(e)}
+        
+        # Get downbeats
+        downbeats = madmom_features.downbeats
+        
+        if len(downbeats) == 0:
+            return {"error": "No downbeats found"}
+        
+        # Create segments based on downbeats (reuse existing code)
+        segments = []
+        
+        # Handle first segment
+        if len(downbeats) > 0:
+            first_downbeat = downbeats[0]
+            if first_downbeat < 0.3:
+                # If first downbeat is less than 0.3 sec, start from time 0
+                segments.append({
+                    "start_time": 0.0,
+                    "end_time": first_downbeat,
+                    "segment_id": 0,
+                    "is_special": True
+                })
+            else:
+                # Include audio before first downbeat
+                segments.append({
+                    "start_time": 0.0,
+                    "end_time": first_downbeat,
+                    "segment_id": 0,
+                    "is_special": False
+                })
+        
+        # Create segments between downbeats
+        for i in range(len(downbeats) - 1):
+            segments.append({
+                "start_time": downbeats[i],
+                "end_time": downbeats[i + 1],
+                "segment_id": i + 1,
+                "is_special": False
+            })
+        
+        # Handle last segment
+        if len(downbeats) > 0:
+            last_downbeat = downbeats[-1]
+            time_since_last = total_duration - last_downbeat
+            
+            if time_since_last < 0.3:
+                # If last downbeat is less than 0.3 seconds from end, connect to previous segment
+                if len(segments) > 0:
+                    segments[-1]["end_time"] = total_duration
+                    segments[-1]["is_special"] = True
+            else:
+                # Create final segment
+                segments.append({
+                    "start_time": last_downbeat,
+                    "end_time": total_duration,
+                    "segment_id": len(segments),
+                    "is_special": False
+                })
+        
+        # Extract features for each segment (reuse existing code)
+        essentia_analyzer = EssentiaAnalyzer()
+        
+        for segment in segments:
+            try:
+                # Extract audio segment
+                start_sample = int(segment["start_time"] * sr)
+                end_sample = int(segment["end_time"] * sr)
+                segment_audio = audio[start_sample:end_sample]
+                
+                # Save segment to temporary file
+                temp_path = f"temp_downbeat_segment_{segment['segment_id']}.wav"
+                import soundfile as sf
+                sf.write(temp_path, segment_audio, sr)
+                
+                # Extract features
+                features = essentia_analyzer.extract_features(temp_path)
+                
+                # Store key features as a dictionary
+                segment["features"] = {
+                    "danceability": features.danceability,
+                    "energy": features.energy,
+                    "valence": features.valence,
+                    "loudness": features.loudness,
+                    "acousticness": features.acousticness,
+                    "instrumentalness": features.instrumentalness,
+                    "key": features.key,
+                    "mode": features.mode,
+                    "spectral_centroid": features.spectral_centroid,
+                    "spectral_rolloff": features.spectral_rolloff,
+                    "spectral_bandwidth": features.spectral_bandwidth,
+                    "zero_crossing_rate": features.zero_crossing_rate
+                }
+                
+                # Clean up temporary file
+                os.remove(temp_path)
+                
+            except Exception as e:
+                print(f"Error processing segment {segment['segment_id']}: {e}")
+                # Set default features if extraction fails
+                segment["features"] = {
+                    "danceability": 0.5,
+                    "energy": 0.5,
+                    "valence": 0.5,
+                    "loudness": 0.5,
+                    "acousticness": 0.5,
+                    "instrumentalness": 0.5,
+                    "key": 0,
+                    "mode": 0,
+                    "spectral_centroid": 0.5,
+                    "spectral_rolloff": 0.5,
+                    "spectral_bandwidth": 0.5,
+                    "zero_crossing_rate": 0.5
+                }
+        
+        # Create similarity-based groups
+        similarity_groups = []
+        used_segments = set()
+        
+        # Create feature matrix for similarity calculation
+        feature_matrix = []
+        for segment in segments:
+            feature_vector = list(segment["features"].values())
+            feature_matrix.append(feature_vector)
+        
+        feature_matrix = np.array(feature_matrix)
+        
+        # Normalize features
+        scaler = StandardScaler()
+        normalized_features = scaler.fit_transform(feature_matrix)
+        
+        # Calculate pairwise similarities
+        similarities = np.corrcoef(normalized_features)
+        
+        # Find similar segments and create groups
+        for i in range(len(segments)):
+            if i in used_segments:
+                continue
+                
+            # Start a new group with this segment
+            current_group = [i]
+            used_segments.add(i)
+            
+            # Find similar segments to add to the group
+            for j in range(i + 1, len(segments)):
+                if j in used_segments:
+                    continue
+                    
+                # Check if this segment is similar to all segments in the current group
+                is_similar_to_group = True
+                for k in current_group:
+                    if similarities[k, j] < similarity_threshold:
+                        is_similar_to_group = False
+                        break
+                
+                if is_similar_to_group:
+                    current_group.append(j)
+                    used_segments.add(j)
+            
+            # Only add groups with more than one segment
+            if len(current_group) > 1:
+                # Calculate average features for this group
+                avg_features = {}
+                for feature_name in segments[0]["features"].keys():
+                    feature_values = [segments[idx]["features"][feature_name] for idx in current_group]
+                    avg_features[feature_name] = np.mean(feature_values)
+                
+                similarity_groups.append({
+                    "group_id": len(similarity_groups),
+                    "segment_indices": current_group,
+                    "start_time": segments[current_group[0]]["start_time"],
+                    "end_time": segments[current_group[-1]]["end_time"],
+                    "num_segments": len(current_group),
+                    "avg_features": avg_features,
+                    "similarities": {
+                        "min_similarity": min(similarities[i, j] for i_idx, i in enumerate(current_group)
+                                             for j in current_group[i_idx+1:]),
+                        "avg_similarity": np.mean([similarities[i, j] for i_idx, i in enumerate(current_group)
+                                                 for j in current_group[i_idx+1:]])
+                    }
+                })
+        
+        return {
+            "segments": segments,
+            "similarity_groups": similarity_groups,
+            "similarity_threshold": similarity_threshold,
+            "total_duration": total_duration,
+            "num_downbeats": len(downbeats),
+            "downbeat_times": downbeats.tolist(),
+            "similarity_matrix": similarities.tolist()
+        }
+    
+    def segment_by_consecutive_similarity(self, audio_path: PathLike, madmom_features: MadmomFeatures,
+                                        similarity_threshold: float = 0.85) -> Dict[str, Any]:
+        """
+        Create segments based on downbeats and group consecutive segments by similarity
+        
+        Parameters
+        ----------
+        audio_path : PathLike
+            Path to the audio file
+        madmom_features : MadmomFeatures
+            Madmom features containing downbeats
+        similarity_threshold : float, optional
+            Minimum similarity score for consecutive segments to be grouped (default: 0.85)
+            
+        Returns
+        -------
+        Dict[str, Any]
+            Dictionary containing segmentation results and consecutive similarity-based groups
+        """
+        audio_path = mkpath(audio_path)
+        
+        # Load audio to get total duration
+        try:
+            audio, sr = librosa.load(str(audio_path), sr=None)
+            total_duration = len(audio) / sr
+        except Exception as e:
+            print(f"Error loading audio: {e}")
+            return {"error": str(e)}
+        
+        # Get downbeats
+        downbeats = madmom_features.downbeats
+        
+        if len(downbeats) == 0:
+            return {"error": "No downbeats found"}
+        
+        # Create segments based on downbeats (reuse existing code)
+        segments = []
+        
+        # Handle first segment
+        if len(downbeats) > 0:
+            first_downbeat = downbeats[0]
+            if first_downbeat < 0.3:
+                # If first downbeat is less than 0.3 sec, start from time 0
+                segments.append({
+                    "start_time": 0.0,
+                    "end_time": first_downbeat,
+                    "segment_id": 0,
+                    "is_special": True
+                })
+            else:
+                # Include audio before first downbeat
+                segments.append({
+                    "start_time": 0.0,
+                    "end_time": first_downbeat,
+                    "segment_id": 0,
+                    "is_special": False
+                })
+        
+        # Create segments between downbeats
+        for i in range(len(downbeats) - 1):
+            segments.append({
+                "start_time": downbeats[i],
+                "end_time": downbeats[i + 1],
+                "segment_id": i + 1,
+                "is_special": False
+            })
+        
+        # Handle last segment
+        if len(downbeats) > 0:
+            last_downbeat = downbeats[-1]
+            time_since_last = total_duration - last_downbeat
+            
+            if time_since_last < 0.3:
+                # If last downbeat is less than 0.3 seconds from end, connect to previous segment
+                if len(segments) > 0:
+                    segments[-1]["end_time"] = total_duration
+                    segments[-1]["is_special"] = True
+            else:
+                # Create final segment
+                segments.append({
+                    "start_time": last_downbeat,
+                    "end_time": total_duration,
+                    "segment_id": len(segments),
+                    "is_special": False
+                })
+        
+        # Extract features for each segment (reuse existing code)
+        essentia_analyzer = EssentiaAnalyzer()
+        
+        for segment in segments:
+            try:
+                # Extract audio segment
+                start_sample = int(segment["start_time"] * sr)
+                end_sample = int(segment["end_time"] * sr)
+                segment_audio = audio[start_sample:end_sample]
+                
+                # Save segment to temporary file
+                temp_path = f"temp_downbeat_segment_{segment['segment_id']}.wav"
+                import soundfile as sf
+                sf.write(temp_path, segment_audio, sr)
+                
+                # Extract features
+                features = essentia_analyzer.extract_features(temp_path)
+                
+                # Store key features as a dictionary
+                segment["features"] = {
+                    "danceability": features.danceability,
+                    "energy": features.energy,
+                    "valence": features.valence,
+                    "loudness": features.loudness,
+                    "acousticness": features.acousticness,
+                    "instrumentalness": features.instrumentalness,
+                    "key": features.key,
+                    "mode": features.mode,
+                    "spectral_centroid": features.spectral_centroid,
+                    "spectral_rolloff": features.spectral_rolloff,
+                    "spectral_bandwidth": features.spectral_bandwidth,
+                    "zero_crossing_rate": features.zero_crossing_rate
+                }
+                
+                # Clean up temporary file
+                os.remove(temp_path)
+                
+            except Exception as e:
+                print(f"Error processing segment {segment['segment_id']}: {e}")
+                # Set default features if extraction fails
+                segment["features"] = {
+                    "danceability": 0.5,
+                    "energy": 0.5,
+                    "valence": 0.5,
+                    "loudness": 0.5,
+                    "acousticness": 0.5,
+                    "instrumentalness": 0.5,
+                    "key": 0,
+                    "mode": 0,
+                    "spectral_centroid": 0.5,
+                    "spectral_rolloff": 0.5,
+                    "spectral_bandwidth": 0.5,
+                    "zero_crossing_rate": 0.5
+                }
+        
+        # Create consecutive similarity-based groups
+        consecutive_groups = []
+        
+        # Create feature matrix for similarity calculation
+        feature_matrix = []
+        for segment in segments:
+            feature_vector = list(segment["features"].values())
+            feature_matrix.append(feature_vector)
+        
+        feature_matrix = np.array(feature_matrix)
+        
+        # Normalize features
+        scaler = StandardScaler()
+        normalized_features = scaler.fit_transform(feature_matrix)
+        
+        # Calculate pairwise similarities
+        similarities = np.corrcoef(normalized_features)
+        
+        # Group consecutive segments based on similarity
+        current_group = [0]  # Start with the first segment
+        
+        for i in range(1, len(segments)):
+            # Check if this segment is similar to the previous one
+            if similarities[i-1, i] >= similarity_threshold:
+                # Add to current group
+                current_group.append(i)
+            else:
+                # End current group and start a new one
+                if len(current_group) > 1:  # Only save groups with more than one segment
+                    # Calculate average features for this group
+                    avg_features = {}
+                    for feature_name in segments[0]["features"].keys():
+                        feature_values = [segments[idx]["features"][feature_name] for idx in current_group]
+                        avg_features[feature_name] = np.mean(feature_values)
+                    
+                    consecutive_groups.append({
+                        "group_id": len(consecutive_groups),
+                        "segment_indices": current_group,
+                        "start_time": segments[current_group[0]]["start_time"],
+                        "end_time": segments[current_group[-1]]["end_time"],
+                        "num_segments": len(current_group),
+                        "avg_features": avg_features
+                    })
+                
+                # Start a new group with this segment
+                current_group = [i]
+        
+        # Handle the last group
+        if len(current_group) > 1:  # Only save groups with more than one segment
+            # Calculate average features for this group
+            avg_features = {}
+            for feature_name in segments[0]["features"].keys():
+                feature_values = [segments[idx]["features"][feature_name] for idx in current_group]
+                avg_features[feature_name] = np.mean(feature_values)
+            
+            consecutive_groups.append({
+                "group_id": len(consecutive_groups),
+                "segment_indices": current_group,
+                "start_time": segments[current_group[0]]["start_time"],
+                "end_time": segments[current_group[-1]]["end_time"],
+                "num_segments": len(current_group),
+                "avg_features": avg_features
+            })
+        
+        # Calculate similarities between consecutive groups
+        if len(consecutive_groups) > 1:
+            # Create feature matrix for groups
+            group_feature_matrix = []
+            for group in consecutive_groups:
+                feature_vector = list(group["avg_features"].values())
+                group_feature_matrix.append(feature_vector)
+            
+            group_feature_matrix = np.array(group_feature_matrix)
+            
+            # Normalize group features
+            group_scaler = StandardScaler()
+            normalized_group_features = group_scaler.fit_transform(group_feature_matrix)
+            
+            # Calculate pairwise group similarities
+            group_similarities = np.corrcoef(normalized_group_features)
+            
+            # Find most similar group pairs
+            most_similar_pairs = []
+            for i in range(len(consecutive_groups)):
+                for j in range(i + 1, len(consecutive_groups)):
+                    similarity_score = group_similarities[i, j]
+                    most_similar_pairs.append({
+                        "group1_id": i,
+                        "group2_id": j,
+                        "similarity": similarity_score,
+                        "group1_start": consecutive_groups[i]["start_time"],
+                        "group1_end": consecutive_groups[i]["end_time"],
+                        "group1_segments": consecutive_groups[i]["segment_indices"],
+                        "group2_start": consecutive_groups[j]["start_time"],
+                        "group2_end": consecutive_groups[j]["end_time"],
+                        "group2_segments": consecutive_groups[j]["segment_indices"]
+                    })
+            
+            # Sort by similarity (descending)
+            most_similar_pairs.sort(key=lambda x: x["similarity"], reverse=True)
+        else:
+            group_similarities = np.array([[1.0]])
+            most_similar_pairs = []
+        
+        return {
+            "segments": segments,
+            "consecutive_groups": consecutive_groups,
+            "group_similarities": {
+                "most_similar_pairs": most_similar_pairs[:10],  # Top 10 pairs
+                "similarity_matrix": group_similarities.tolist()
+            },
+            "similarity_threshold": similarity_threshold,
+            "total_duration": total_duration,
+            "num_downbeats": len(downbeats),
+            "downbeat_times": downbeats.tolist(),
+            "segment_similarity_matrix": similarities.tolist()
+        }
 
 
 class ComprehensiveAnalyzer:
@@ -1673,6 +2373,119 @@ class ComprehensiveAnalyzer:
         print("Comprehensive analysis complete!")
         return result
     
+    def segment_by_similarity(self, audio_path: PathLike,
+                            similarity_threshold: float = 0.85) -> Dict[str, Any]:
+        """
+        Segment track based on downbeats and group segments by similarity
+        
+        Parameters
+        ----------
+        audio_path : PathLike
+            Path to the audio file
+        similarity_threshold : float, optional
+            Minimum similarity score for segments to be grouped (default: 0.85)
+            
+        Returns
+        -------
+        Dict[str, Any]
+            Dictionary containing segmentation results and similarity-based groups
+        """
+        audio_path = mkpath(audio_path)
+        
+        # Check if Madmom analyzer is available
+        if not self.madmom_analyzer:
+            return {"error": "Madmom analyzer not available"}
+        
+        # Extract beats and downbeats
+        print("Extracting beats and downbeats with Madmom...")
+        madmom_features = self.madmom_analyzer.extract_beats_and_downbeats(audio_path)
+        
+        if not madmom_features or len(madmom_features.downbeats) == 0:
+            return {"error": "No downbeats found"}
+        
+        print(f"Found {len(madmom_features.downbeats)} downbeats")
+        
+        # Initialize segmenter
+        self.segmenter = TrackSegmenter()
+        
+        # Perform similarity-based segmentation
+        result = self.segmenter.segment_by_similarity(
+            audio_path, madmom_features, similarity_threshold
+        )
+        
+        if "error" in result:
+            return result
+        
+        def segment_by_consecutive_similarity(self, audio_path: PathLike,
+                                            similarity_threshold: float = 0.85) -> Dict[str, Any]:
+            """
+            Segment track based on downbeats and group consecutive segments by similarity
+            
+            Parameters
+            ----------
+            audio_path : PathLike
+                Path to the audio file
+            similarity_threshold : float, optional
+                Minimum similarity score for consecutive segments to be grouped (default: 0.85)
+                
+            Returns
+            -------
+            Dict[str, Any]
+                Dictionary containing segmentation results and consecutive similarity-based groups
+            """
+            audio_path = mkpath(audio_path)
+            
+            # Check if Madmom analyzer is available
+            if not self.madmom_analyzer:
+                return {"error": "Madmom analyzer not available"}
+            
+            # Extract beats and downbeats
+            print("Extracting beats and downbeats with Madmom...")
+            madmom_features = self.madmom_analyzer.extract_beats_and_downbeats(audio_path)
+            
+            if not madmom_features or len(madmom_features.downbeats) == 0:
+                return {"error": "No downbeats found"}
+            
+            print(f"Found {len(madmom_features.downbeats)} downbeats")
+            
+            # Initialize segmenter
+            self.segmenter = TrackSegmenter()
+            
+            # Perform consecutive similarity-based segmentation
+            result = self.segmenter.segment_by_consecutive_similarity(
+                audio_path, madmom_features, similarity_threshold
+            )
+            
+            if "error" in result:
+                return result
+            
+            print(f"Created {len(result['segments'])} segments based on downbeats")
+            print(f"Found {len(result['consecutive_groups'])} consecutive similarity-based groups with threshold {similarity_threshold}")
+            
+            # Print group information
+            for group in result['consecutive_groups']:
+                print(f"  Group {group['group_id']}: {group['num_segments']} segments, "
+                      f"{group['start_time']:.2f}s - {group['end_time']:.2f}s")
+            
+            # Print most similar groups
+            if result['group_similarities']['most_similar_pairs']:
+                print("\nMost similar groups:")
+                for pair in result['group_similarities']['most_similar_pairs'][:3]:
+                    print(f"  Groups {pair['group1_id']} and {pair['group2_id']}: "
+                          f"similarity={pair['similarity']:.3f}")
+            
+            return result
+        
+        print(f"Created {len(result['segments'])} segments based on downbeats")
+        print(f"Found {len(result['similarity_groups'])} similarity-based groups with threshold {similarity_threshold}")
+        
+        # Print group information
+        for group in result['similarity_groups']:
+            print(f"  Group {group['group_id']}: {group['num_segments']} segments, "
+                  f"similarity={group['similarities']['avg_similarity']:.3f}")
+        
+        return result
+    
     def segment_track(self, audio_path: PathLike,
                      method: str = 'kmeans',
                      n_clusters: int = 4,
@@ -1725,6 +2538,60 @@ class ComprehensiveAnalyzer:
             print(f"Silhouette score: {segmentation_result.silhouette_score:.3f}")
         
         return segmentation_result
+    
+    def segment_by_downbeats(self, audio_path: PathLike,
+                           segment_group_sizes: List[int] = [1, 2, 4, 8]) -> Dict[str, Any]:
+        """
+        Segment track based on downbeats from madmom
+        
+        Parameters
+        ----------
+        audio_path : PathLike
+            Path to the audio file
+        segment_group_sizes : List[int], optional
+            List of segment group sizes to analyze (default: [1, 2, 4, 8])
+            
+        Returns
+        -------
+        Dict[str, Any]
+            Dictionary containing segmentation results and analysis
+        """
+        audio_path = mkpath(audio_path)
+        
+        # Check if Madmom analyzer is available
+        if not self.madmom_analyzer:
+            return {"error": "Madmom analyzer not available"}
+        
+        # Extract beats and downbeats
+        print("Extracting beats and downbeats with Madmom...")
+        madmom_features = self.madmom_analyzer.extract_beats_and_downbeats(audio_path)
+        
+        if not madmom_features or len(madmom_features.downbeats) == 0:
+            return {"error": "No downbeats found"}
+        
+        print(f"Found {len(madmom_features.downbeats)} downbeats")
+        
+        # Initialize segmenter
+        self.segmenter = TrackSegmenter()
+        
+        # Perform downbeat-based segmentation
+        result = self.segmenter.segment_by_downbeats(
+            audio_path, madmom_features, segment_group_sizes
+        )
+        
+        if "error" in result:
+            return result
+        
+        print(f"Created {len(result['segments'])} segments based on downbeats")
+        
+        # Print similarity results
+        for group_size, sim_data in result["similarities"].items():
+            print(f"\nMost similar {group_size}:")
+            for pair in sim_data["most_similar_pairs"][:3]:
+                print(f"  Groups {pair['group1_id']} and {pair['group2_id']}: "
+                      f"similarity={pair['similarity']:.3f}")
+        
+        return result
     
     def save_results(self, result: ComprehensiveAnalysisResult, output_dir: PathLike):
         """Save analysis results to files"""
@@ -1863,3 +2730,96 @@ def segment_audio_track(audio_path: PathLike,
         enable_madmom=enable_madmom
     )
     return analyzer.segment_track(audio_path, method, n_clusters, segment_duration)
+
+
+def segment_by_downbeats(audio_path: PathLike,
+                        segment_group_sizes: List[int] = [1, 2, 4, 8],
+                        discogs_model_path: Optional[str] = None,
+                        enable_madmom: bool = True) -> Dict[str, Any]:
+    """
+    Convenience function for downbeat-based track segmentation
+    
+    Parameters
+    ----------
+    audio_path : PathLike
+        Path to the audio file to segment
+    segment_group_sizes : List[int], optional
+        List of segment group sizes to analyze (default: [1, 2, 4, 8])
+    discogs_model_path : str, optional
+        Path to the Discogs model file. Required if the model is not in Essentia's installation.
+    enable_madmom : bool, optional
+        Whether to enable Madmom beat and downbeat analysis (default: True)
+        
+    Returns
+    -------
+    Dict[str, Any]
+        Dictionary containing segmentation results and analysis
+    """
+    analyzer = ComprehensiveAnalyzer(
+        enable_discogs=True,  # Enable Discogs for potential future use
+        discogs_model_path=discogs_model_path,
+        enable_madmom=enable_madmom
+    )
+    return analyzer.segment_by_downbeats(audio_path, segment_group_sizes)
+
+
+def segment_by_similarity(audio_path: PathLike,
+                        similarity_threshold: float = 0.85,
+                        discogs_model_path: Optional[str] = None,
+                        enable_madmom: bool = True) -> Dict[str, Any]:
+    """
+    Convenience function for similarity-based track segmentation
+    
+    Parameters
+    ----------
+    audio_path : PathLike
+        Path to the audio file to segment
+    similarity_threshold : float, optional
+        Minimum similarity score for segments to be grouped (default: 0.85)
+    discogs_model_path : str, optional
+        Path to the Discogs model file. Required if the model is not in Essentia's installation.
+    enable_madmom : bool, optional
+        Whether to enable Madmom beat and downbeat analysis (default: True)
+        
+    Returns
+    -------
+    Dict[str, Any]
+        Dictionary containing segmentation results and similarity-based groups
+    """
+    analyzer = ComprehensiveAnalyzer(
+        enable_discogs=True,  # Enable Discogs for potential future use
+        discogs_model_path=discogs_model_path,
+        enable_madmom=enable_madmom
+    )
+    return analyzer.segment_by_similarity(audio_path, similarity_threshold)
+
+
+def segment_by_consecutive_similarity(audio_path: PathLike,
+                                    similarity_threshold: float = 0.85,
+                                    discogs_model_path: Optional[str] = None,
+                                    enable_madmom: bool = True) -> Dict[str, Any]:
+    """
+    Convenience function for consecutive similarity-based track segmentation
+    
+    Parameters
+    ----------
+    audio_path : PathLike
+        Path to the audio file to segment
+    similarity_threshold : float, optional
+        Minimum similarity score for consecutive segments to be grouped (default: 0.85)
+    discogs_model_path : str, optional
+        Path to the Discogs model file. Required if the model is not in Essentia's installation.
+    enable_madmom : bool, optional
+        Whether to enable Madmom beat and downbeat analysis (default: True)
+        
+    Returns
+    -------
+    Dict[str, Any]
+        Dictionary containing segmentation results and consecutive similarity-based groups
+    """
+    analyzer = ComprehensiveAnalyzer(
+        enable_discogs=True,  # Enable Discogs for potential future use
+        discogs_model_path=discogs_model_path,
+        enable_madmom=enable_madmom
+    )
+    return analyzer.segment_by_consecutive_similarity(audio_path, similarity_threshold)

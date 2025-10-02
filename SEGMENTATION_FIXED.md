@@ -5,12 +5,15 @@
 The `comprehensive_audio_analyzer.py` script was not enabling segmentation by default. The following changes were made:
 
 ### 1. Changed Default Behavior
+
 - **Before**: `--enable-segmentation` was `False` by default
 - **After**: `--enable-segmentation` is `True` by default
 - Added `--disable-segmentation` flag to turn it off if needed
 
 ### 2. Added Grouped Segmentation Output
+
 The analysis summary now shows:
+
 - Individual segment clustering results
 - Grouped segmentation results with:
   - Time ranges for each group
@@ -46,6 +49,7 @@ Segments grouped into 38 groups based on feature similarity
 ## Example: Your Test File Analysis
 
 For "Blur - Song 2 (Brannco, Ozzone Remix)":
+
 - **Duration**: 241 seconds (4 minutes)
 - **Downbeats detected**: 126
 - **Segments created**: 125 (one between each pair of downbeats)
@@ -53,6 +57,7 @@ For "Blur - Song 2 (Brannco, Ozzone Remix)":
 - **Segment groups**: 38 (consecutive similar segments grouped together)
 
 This means:
+
 1. The track was divided into 125 musically-meaningful segments based on downbeats
 2. These segments were clustered into 4 distinct sonic patterns
 3. Consecutive similar segments were grouped into 38 larger sections
@@ -60,6 +65,7 @@ This means:
 ## How to Use
 
 ### Default (Segmentation Enabled)
+
 ```bash
 python comprehensive_audio_analyzer.py \
   --input song.mp3 \
@@ -68,6 +74,7 @@ python comprehensive_audio_analyzer.py \
 ```
 
 ### Disable Segmentation
+
 ```bash
 python comprehensive_audio_analyzer.py \
   --input song.mp3 \
@@ -76,6 +83,7 @@ python comprehensive_audio_analyzer.py \
 ```
 
 ### Custom Clustering
+
 ```bash
 python comprehensive_audio_analyzer.py \
   --input song.mp3 \
@@ -148,6 +156,7 @@ The saved JSON file now includes:
 ## Visualization Files
 
 The analyzer also creates visualization files:
+
 - `*_heatmap.png` - Feature heatmap over time
 - `*_timeline.png` - Feature timeline
 - `*_genre_timeline.png` - Genre evolution
@@ -157,6 +166,7 @@ The analyzer also creates visualization files:
 ## Next Steps
 
 You can now:
+
 1. ✅ Use the segmentation data for track analysis
 2. ✅ Identify structural sections (intro, verse, chorus, etc.)
 3. ✅ Track feature changes across time

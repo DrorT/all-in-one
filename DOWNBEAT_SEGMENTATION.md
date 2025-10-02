@@ -11,7 +11,7 @@ This document describes the implementation of downbeat-based segmentation for au
 Each segment is now calculated based on downbeats detected by Madmom:
 
 - **Regular segments**: Time between consecutive downbeats (N to N+1)
-- **First segment**: 
+- **First segment**:
   - If first downbeat < 0.3s: Segment from 0 to 2nd downbeat
   - Otherwise: Segment from 0 to 1st downbeat
 - **Last segment**:
@@ -21,6 +21,7 @@ Each segment is now calculated based on downbeats detected by Madmom:
 ### 2. Per-Segment Feature Extraction
 
 For each segment, the following features are extracted:
+
 - Danceability
 - Energy
 - Valence
@@ -34,6 +35,7 @@ For each segment, the following features are extracted:
 ### 3. Per-Segment Genre Analysis
 
 If Discogs genre classifier is available, each segment gets:
+
 - Genre predictions (probability distribution)
 - Dominant genre label
 - Confidence score
@@ -41,6 +43,7 @@ If Discogs genre classifier is available, each segment gets:
 ### 4. Segment Grouping
 
 Consecutive segments with similar features are automatically grouped together:
+
 - Uses normalized Euclidean distance between feature vectors
 - Default similarity threshold: 0.15
 - Creates segment groups with:
@@ -57,8 +60,8 @@ Consecutive segments with similar features are automatically grouped together:
 ```python
 # Now accepts madmom_features parameter
 def extract_time_features(
-    self, 
-    audio_path: PathLike, 
+    self,
+    audio_path: PathLike,
     segment_duration: float = 5.0,
     madmom_features: Optional[MadmomFeatures] = None
 ) -> TimeBasedFeatures
@@ -78,6 +81,7 @@ def extract_time_features_with_genre(
 ### New Data Classes
 
 #### TimeBasedFeatures (Updated)
+
 ```python
 @dataclass
 class TimeBasedFeatures:
@@ -90,6 +94,7 @@ class TimeBasedFeatures:
 ```
 
 #### SegmentGroup (New)
+
 ```python
 @dataclass
 class SegmentGroup:
@@ -103,6 +108,7 @@ class SegmentGroup:
 ```
 
 #### GroupedSegmentationResult (New)
+
 ```python
 @dataclass
 class GroupedSegmentationResult:
@@ -113,6 +119,7 @@ class GroupedSegmentationResult:
 ```
 
 #### ComprehensiveAnalysisResult (Updated)
+
 ```python
 @dataclass
 class ComprehensiveAnalysisResult:
@@ -129,10 +136,11 @@ class ComprehensiveAnalysisResult:
 ### New Functions
 
 #### calculate_downbeat_segments()
+
 ```python
 def calculate_downbeat_segments(
-    downbeats: np.ndarray, 
-    audio_duration: float, 
+    downbeats: np.ndarray,
+    audio_duration: float,
     min_edge_duration: float = 0.3
 ) -> List[Tuple[float, float]]
 ```
@@ -140,6 +148,7 @@ def calculate_downbeat_segments(
 Calculates segment boundaries from downbeat times with special handling for edge cases.
 
 #### group_similar_segments()
+
 ```python
 def group_similar_segments(
     segments: List[SegmentInfo],
@@ -199,6 +208,7 @@ for group in result.grouped_segmentation.segment_groups:
 ## Fallback Behavior
 
 If Madmom is not available or downbeat detection fails:
+
 - System falls back to fixed-duration segmentation
 - Default segment duration: 5.0 seconds
 - All other functionality remains the same
@@ -219,6 +229,7 @@ Run the test script to verify the implementation:
 ```
 
 This tests:
+
 - Edge case handling (early first downbeat, late last downbeat)
 - Normal downbeat segmentation
 - Fallback behavior (no downbeats)

@@ -28,6 +28,7 @@ Similar Consecutive Segments Grouped
 ## Edge Cases
 
 ### First Downbeat < 0.3s
+
 ```python
 # Input
 downbeats = [0.15, 2.0, 4.0, 6.0]
@@ -38,6 +39,7 @@ segments = [(0.0, 2.0), (2.0, 4.0), (4.0, 6.0), (6.0, 8.0)]
 ```
 
 ### Last Downbeat Close to End (< 0.3s remaining)
+
 ```python
 # Input
 downbeats = [2.0, 4.0, 6.0, 7.85]
@@ -50,6 +52,7 @@ segments = [(0.0, 2.0), (2.0, 4.0), (4.0, 6.0), (6.0, 8.0)]
 ## Code Examples
 
 ### Basic Analysis
+
 ```python
 from src.allin1.comprehensive_analysis import analyze_audio_comprehensive
 
@@ -67,6 +70,7 @@ for seg in result.segmentation_result.segments:
 ```
 
 ### Access Segment Groups
+
 ```python
 # Groups are automatically created
 for group in result.grouped_segmentation.segment_groups:
@@ -77,6 +81,7 @@ for group in result.grouped_segmentation.segment_groups:
 ```
 
 ### Custom Similarity Threshold
+
 ```python
 from src.allin1.comprehensive_analysis import group_similar_segments
 
@@ -91,6 +96,7 @@ grouped = group_similar_segments(
 ## Available Features Per Segment
 
 ### Audio Features
+
 - `danceability` - How suitable for dancing (0-1)
 - `energy` - Intensity and activity (0-1)
 - `valence` - Musical positiveness (0-1)
@@ -102,17 +108,20 @@ grouped = group_similar_segments(
 - `chroma_mean` - Pitch class profile
 
 ### Genre Features (if enabled)
+
 - `dominant_genre` - Most likely genre
 - `genre_confidence` - Confidence score (0-1)
 
 ## Command Line Usage
 
 ### Run Example Script
+
 ```bash
 ~/venvs/pydemucs/bin/python example_downbeat_segmentation.py song.mp3 output/
 ```
 
 ### Run Tests
+
 ```bash
 ~/venvs/pydemucs/bin/python test_downbeat_segmentation.py
 ```
@@ -160,18 +169,21 @@ ComprehensiveAnalysisResult
 ## Troubleshooting
 
 ### Madmom Not Available
+
 ```
 Solution: Install with pip install madmom
 Fallback: System uses fixed-duration segments
 ```
 
 ### Too Many/Few Segments
+
 ```
 Check: Downbeat detection accuracy
 Adjust: Use different time signature in DBNDownBeatTrackingProcessor
 ```
 
 ### Groups Don't Make Sense
+
 ```
 Adjust: similarity_threshold parameter
 Lower (e.g., 0.10): More, smaller groups

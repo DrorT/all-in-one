@@ -5,6 +5,7 @@
 ### 1. Core Functionality Added
 
 #### New Function: `calculate_downbeat_segments()`
+
 - **Location**: `src/allin1/comprehensive_analysis.py` (before TimeBasedAnalyzer class)
 - **Purpose**: Calculate segment boundaries based on downbeat times
 - **Features**:
@@ -13,6 +14,7 @@
   - Falls back to full track if no downbeats detected
 
 #### New Function: `group_similar_segments()`
+
 - **Location**: `src/allin1/comprehensive_analysis.py` (after SegmentationResult dataclass)
 - **Purpose**: Group consecutive segments with similar features
 - **Features**:
@@ -24,10 +26,12 @@
 ### 2. Data Classes Modified/Added
 
 #### Modified: `TimeBasedFeatures`
+
 - Added field: `segment_boundaries: Optional[List[Tuple[float, float]]]`
 - Stores actual start/end times for each segment
 
 #### New: `SegmentGroup`
+
 ```python
 @dataclass
 class SegmentGroup:
@@ -41,6 +45,7 @@ class SegmentGroup:
 ```
 
 #### New: `GroupedSegmentationResult`
+
 ```python
 @dataclass
 class GroupedSegmentationResult:
@@ -51,32 +56,37 @@ class GroupedSegmentationResult:
 ```
 
 #### Modified: `ComprehensiveAnalysisResult`
+
 - Added field: `grouped_segmentation: Optional[GroupedSegmentationResult]`
 
 ### 3. Methods Updated
 
 #### `TimeBasedAnalyzer.extract_time_features()`
+
 - **Change**: Added parameter `madmom_features: Optional[MadmomFeatures] = None`
-- **Behavior**: 
+- **Behavior**:
   - If madmom_features provided and has downbeats: use downbeat-based segmentation
   - Otherwise: fall back to fixed-duration segmentation
   - Stores segment boundaries in TimeBasedFeatures
 
 #### `TimeBasedAnalyzer.extract_time_features_with_genre()`
+
 - **Change**: Added parameter `madmom_features: Optional[MadmomFeatures] = None`
-- **Behavior**: 
+- **Behavior**:
   - Passes madmom_features to extract_time_features()
   - Analyzes genre for each downbeat-based segment
   - Ensures segment_boundaries are stored
 
 #### `TrackSegmenter.segment_track()`
+
 - **Change**: Now uses stored segment_boundaries from TimeBasedFeatures
 - **Behavior**:
   - Prioritizes stored boundaries over estimated ones
   - Falls back to estimation only if boundaries not available
 
 #### `ComprehensiveAnalyzer.analyze()`
-- **Change**: 
+
+- **Change**:
   - Passes madmom_features to time analysis methods
   - Calls group_similar_segments() after segmentation
   - Stores grouped_segmentation in result
@@ -85,16 +95,19 @@ class GroupedSegmentationResult:
 ### 4. Files Created
 
 #### `test_downbeat_segmentation.py`
+
 - Unit tests for calculate_downbeat_segments()
 - Test cases for all edge conditions
 - Usage demonstration
 
 #### `example_downbeat_segmentation.py`
+
 - Complete example script
 - Shows real-world usage
 - Detailed output formatting
 
 #### `DOWNBEAT_SEGMENTATION.md`
+
 - Comprehensive documentation
 - API reference
 - Usage examples
@@ -105,22 +118,26 @@ class GroupedSegmentationResult:
 ### Workflow
 
 1. **Downbeat Detection** (Madmom)
+
    - RNNDownBeatProcessor detects downbeat activations
    - DBNDownBeatTrackingProcessor tracks downbeats with beat numbers
    - Extracts timestamps where beat_number == 1
 
 2. **Segment Boundary Calculation**
+
    - First segment: 0 to first downbeat (or to 2nd if 1st < 0.3s)
    - Middle segments: Between consecutive downbeats
    - Last segment: Last downbeat to end (or extend previous if < 0.3s from end)
 
 3. **Feature Extraction Per Segment**
+
    - Load audio segment
    - Extract Essentia features
    - Calculate MFCC and chroma means
    - Optionally: Analyze genre with Discogs model
 
 4. **Clustering** (Optional)
+
    - Normalize features
    - Apply clustering algorithm (KMeans/DBSCAN/Hierarchical)
    - Assign cluster ID to each segment
@@ -160,11 +177,13 @@ Track: 180s duration
 ## Testing
 
 Run tests:
+
 ```bash
 ~/venvs/pydemucs/bin/python test_downbeat_segmentation.py
 ```
 
 Run example (requires audio file):
+
 ```bash
 ~/venvs/pydemucs/bin/python example_downbeat_segmentation.py path/to/song.mp3
 ```

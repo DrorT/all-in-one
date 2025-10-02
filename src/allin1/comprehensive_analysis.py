@@ -138,6 +138,7 @@ class TimeBasedFeatures:
     feature_names: List[str]
     genre_predictions: Optional[np.ndarray] = None
     genre_labels: Optional[List[str]] = None
+    segment_boundaries: Optional[List[Tuple[float, float]]] = None  # List of (start, end) times
 
 
 @dataclass
@@ -164,6 +165,145 @@ class SegmentationResult:
 
 
 @dataclass
+class SegmentGroup:
+    """Data class for a group of consecutive similar segments"""
+    group_id: int
+    start_time: float
+    end_time: float
+    segment_ids: List[int]
+    avg_features: Dict[str, float]
+    dominant_genre: Optional[str] = None
+    genre_confidence: Optional[float] = None
+
+
+@dataclass
+class GroupedSegmentationResult:
+    """Data class for grouped segmentation results"""
+    segment_groups: List[SegmentGroup]
+    original_segments: List[SegmentInfo]
+    num_groups: int
+    feature_names: List[str]
+
+
+def group_similar_segments(segments: List[SegmentInfo],
+                          feature_names: List[str],
+                          similarity_threshold: float = 0.15) -> GroupedSegmentationResult:
+    """
+    Group consecutive segments with similar features.
+    
+    Parameters
+    ----------
+    segments : List[SegmentInfo]
+        List of segments to group
+    feature_names : List[str]
+        Names of features to use for similarity calculation
+    similarity_threshold : float, optional
+        Maximum normalized difference between features to consider segments similar.
+        Lower values mean stricter similarity. Default: 0.15
+        
+    Returns
+    -------
+    GroupedSegmentationResult
+        Grouped segmentation results
+    """
+    if len(segments) == 0:
+        return GroupedSegmentationResult(
+            segment_groups=[],
+            original_segments=segments,
+            num_groups=0,
+            feature_names=feature_names
+        )
+    
+    # Extract feature matrix for normalization
+    feature_matrix = []
+    for seg in segments:
+        feature_vector = []
+        for fname in feature_names:
+            if fname in seg.features:
+                feature_vector.append(seg.features[fname])
+            else:
+                feature_vector.append(0.0)
+        feature_matrix.append(feature_vector)
+    
+    feature_matrix = np.array(feature_matrix)
+    
+    # Normalize features to 0-1 range for fair comparison
+    scaler = MinMaxScaler()
+    normalized_features = scaler.fit_transform(feature_matrix)
+    
+    # Group consecutive segments with similar features
+    groups = []
+    current_group_segments = [0]  # Start with first segment
+    
+    for i in range(1, len(segments)):
+        # Calculate normalized Euclidean distance between consecutive segments
+        prev_features = normalized_features[i-1]
+        curr_features = normalized_features[i]
+        
+        # Calculate distance
+        distance = np.linalg.norm(prev_features - curr_features) / np.sqrt(len(feature_names))
+        
+        if distance <= similarity_threshold:
+            # Similar enough, add to current group
+            current_group_segments.append(i)
+        else:
+            # Different enough, start new group
+            groups.append(current_group_segments)
+            current_group_segments = [i]
+    
+    # Add the last group
+    groups.append(current_group_segments)
+    
+    # Create SegmentGroup objects
+    segment_groups = []
+    for group_id, group_indices in enumerate(groups):
+        # Get start and end times
+        start_time = segments[group_indices[0]].start_time
+        end_time = segments[group_indices[-1]].end_time
+        
+        # Average features across the group
+        avg_features = {}
+        for fname in feature_names:
+            values = [segments[idx].features.get(fname, 0.0) for idx in group_indices]
+            avg_features[fname] = float(np.mean(values))
+        
+        # Determine dominant genre (most common across the group)
+        genres = [segments[idx].dominant_genre for idx in group_indices if segments[idx].dominant_genre]
+        if genres:
+            # Get most common genre
+            from collections import Counter
+            genre_counter = Counter(genres)
+            dominant_genre = genre_counter.most_common(1)[0][0]
+            
+            # Average confidence for the dominant genre
+            confidences = [segments[idx].genre_confidence 
+                          for idx in group_indices 
+                          if segments[idx].dominant_genre == dominant_genre 
+                          and segments[idx].genre_confidence is not None]
+            genre_confidence = float(np.mean(confidences)) if confidences else None
+        else:
+            dominant_genre = None
+            genre_confidence = None
+        
+        segment_groups.append(SegmentGroup(
+            group_id=group_id,
+            start_time=start_time,
+            end_time=end_time,
+            segment_ids=[segments[idx].segment_id for idx in group_indices],
+            avg_features=avg_features,
+            dominant_genre=dominant_genre,
+            genre_confidence=genre_confidence
+        ))
+    
+    return GroupedSegmentationResult(
+        segment_groups=segment_groups,
+        original_segments=segments,
+        num_groups=len(segment_groups),
+        feature_names=feature_names
+    )
+
+
+@dataclass
 class ComprehensiveAnalysisResult:
     """Data class for comprehensive analysis results"""
     path: Path
@@ -173,6 +313,7 @@ class ComprehensiveAnalysisResult:
     time_based_features: TimeBasedFeatures
     original_analysis: Optional[AnalysisResult] = None
     segmentation_result: Optional[SegmentationResult] = None
+    grouped_segmentation: Optional[GroupedSegmentationResult] = None
 
 
 class EssentiaAnalyzer:
@@ -760,6 +901,70 @@ class DiscogsAnalyzer:
         return None
 
 
+def calculate_downbeat_segments(downbeats: np.ndarray, audio_duration: float, 
+                               min_edge_duration: float = 0.3) -> List[Tuple[float, float]]:
+    """
+    Calculate segment boundaries based on downbeats.
+    
+    Parameters
+    ----------
+    downbeats : np.ndarray
+        Array of downbeat times in seconds
+    audio_duration : float
+        Total duration of the audio in seconds
+    min_edge_duration : float, optional
+        Minimum duration for edge segments (first/last). If shorter, 
+        merge with adjacent segment. Default: 0.3 seconds
+        
+    Returns
+    -------
+    List[Tuple[float, float]]
+        List of (start_time, end_time) tuples for each segment
+    """
+    if len(downbeats) == 0:
+        # No downbeats, return single segment for entire track
+        return [(0.0, audio_duration)]
+    
+    segments = []
+    downbeats = np.sort(downbeats)  # Ensure sorted
+    
+    # Determine first segment
+    first_downbeat = downbeats[0]
+    if first_downbeat < min_edge_duration:
+        # First downbeat is very early, create segment from 0 to second downbeat (or end if only one)
+        first_segment_start = 0.0
+        first_segment_end = downbeats[1] if len(downbeats) > 1 else audio_duration
+        segments.append((first_segment_start, first_segment_end))
+        segment_start_idx = 1  # Start middle segments from second downbeat
+    else:
+        # First segment includes audio before first downbeat
+        first_segment_start = 0.0
+        first_segment_end = first_downbeat
+        segments.append((first_segment_start, first_segment_end))
+        segment_start_idx = 0  # Start middle segments from first downbeat
+    
+    # Middle segments: between consecutive downbeats
+    for i in range(segment_start_idx, len(downbeats) - 1):
+        start_time = downbeats[i]
+        end_time = downbeats[i + 1]
+        segments.append((start_time, end_time))
+    
+    # Determine last segment
+    last_downbeat = downbeats[-1]
+    time_after_last = audio_duration - last_downbeat
+    
+    if time_after_last < min_edge_duration:
+        # Last downbeat is very close to end, extend previous segment
+        if len(segments) > 0:
+            # Extend the last segment to the end
+            segments[-1] = (segments[-1][0], audio_duration)
+    else:
+        # Last segment is everything after last downbeat
+        segments.append((last_downbeat, audio_duration))
+    
+    return segments
+
+
 class TimeBasedAnalyzer:
     """Class for extracting time-based features"""
     
@@ -768,17 +973,34 @@ class TimeBasedAnalyzer:
         self.hop_length = hop_length
         
     def extract_time_features(self, audio_path: PathLike, 
-                            segment_duration: float = 5.0) -> TimeBasedFeatures:
+                            segment_duration: float = 5.0,
+                            madmom_features: Optional[MadmomFeatures] = None) -> TimeBasedFeatures:
         """Extract time-based features by segmenting the audio"""
         audio_path = mkpath(audio_path)
         
         # Load audio
         audio, sr = librosa.load(str(audio_path), sr=self.sample_rate)
+        audio_duration = len(audio) / sr
         
-        # Calculate segment parameters
-        segment_samples = int(segment_duration * sr)
-        total_samples = len(audio)
-        num_segments = int(np.ceil(total_samples / segment_samples))
+        # Determine segments based on downbeats or fixed duration
+        if madmom_features is not None and len(madmom_features.downbeats) > 0:
+            # Use downbeat-based segmentation
+            segment_boundaries = calculate_downbeat_segments(
+                madmom_features.downbeats, audio_duration, min_edge_duration=0.3
+            )
+            print(f"Using {len(segment_boundaries)} downbeat-based segments")
+        else:
+            # Fall back to fixed-duration segmentation
+            segment_samples = int(segment_duration * sr)
+            total_samples = len(audio)
+            num_segments = int(np.ceil(total_samples / segment_samples))
+            
+            segment_boundaries = []
+            for i in range(num_segments):
+                start_time = i * segment_duration
+                end_time = min((i + 1) * segment_duration, audio_duration)
+                segment_boundaries.append((start_time, end_time))
+            print(f"Using {len(segment_boundaries)} fixed-duration segments")
         
         # Initialize feature storage
         features = {
@@ -793,23 +1015,24 @@ class TimeBasedAnalyzer:
             'chroma_mean': []
         }
         
-        # Time stamps for each segment
+        # Time stamps for each segment (middle of segment)
         time_stamps = []
         
         # Initialize Essentia analyzer for segment analysis
         essentia_analyzer = EssentiaAnalyzer(self.sample_rate)
         
         # Process each segment
-        for i in range(num_segments):
-            start_sample = i * segment_samples
-            end_sample = min((i + 1) * segment_samples, total_samples)
+        for seg_idx, (start_time, end_time) in enumerate(segment_boundaries):
+            start_sample = int(start_time * sr)
+            end_sample = int(end_time * sr)
             segment_audio = audio[start_sample:end_sample]
             
-            if len(segment_audio) < segment_samples * 0.5:  # Skip very short segments
+            # Skip very short segments (less than 0.1 seconds)
+            if len(segment_audio) < int(0.1 * sr):
                 continue
                 
             # Save segment to temporary file
-            temp_path = f"temp_segment_{i}.wav"
+            temp_path = f"temp_segment_{seg_idx}.wav"
             import soundfile as sf
             sf.write(temp_path, segment_audio, sr)
             
@@ -843,10 +1066,10 @@ class TimeBasedAnalyzer:
                 features['chroma_mean'].append(np.asarray(chroma_mean, dtype=float).flatten())
                 
                 # Store time stamp (middle of segment)
-                time_stamps.append((start_sample + end_sample) / 2 / sr)
+                time_stamps.append((start_time + end_time) / 2)
                 
             except Exception as e:
-                print(f"Error processing segment {i}: {e}")
+                print(f"Error processing segment {seg_idx} ({start_time:.2f}-{end_time:.2f}): {e}")
             finally:
                 # Clean up temporary file
                 if os.path.exists(temp_path):
@@ -877,31 +1100,91 @@ class TimeBasedAnalyzer:
             features=features,
             feature_names=feature_names,
             genre_predictions=None,
-            genre_labels=None
+            genre_labels=None,
+            segment_boundaries=segment_boundaries
         )
     
     def extract_time_features_with_genre(self, audio_path: PathLike,
                                        segment_duration: float = 5.0,
-                                       discogs_analyzer=None) -> TimeBasedFeatures:
+                                       discogs_analyzer=None,
+                                       madmom_features: Optional[MadmomFeatures] = None) -> TimeBasedFeatures:
         """Extract time-based features by segmenting the audio, including genre analysis"""
         audio_path = mkpath(audio_path)
         
         # First extract standard time-based features
-        time_features = self.extract_time_features(audio_path, segment_duration)
+        time_features = self.extract_time_features(audio_path, segment_duration, madmom_features)
         
-        # If Discogs analyzer is provided, add genre analysis
+        # If Discogs analyzer is provided, add genre analysis for each segment
         if discogs_analyzer and discogs_analyzer.discogs_classifier:
             try:
-                # Get genre predictions over time
-                _, genre_time_stamps, genre_predictions = discogs_analyzer.analyze_genre_over_time(
-                    audio_path, segment_duration
-                )
+                # Load audio to get duration
+                audio, sr = librosa.load(str(audio_path), sr=self.sample_rate)
+                audio_duration = len(audio) / sr
                 
-                # Update the time-based features with genre information
-                time_features.genre_predictions = genre_predictions
-                time_features.genre_labels = discogs_analyzer.genre_labels
+                # Calculate segment boundaries (same as in extract_time_features)
+                if madmom_features is not None and len(madmom_features.downbeats) > 0:
+                    segment_boundaries = calculate_downbeat_segments(
+                        madmom_features.downbeats, audio_duration, min_edge_duration=0.3
+                    )
+                else:
+                    segment_samples = int(segment_duration * sr)
+                    total_samples = len(audio)
+                    num_segments = int(np.ceil(total_samples / segment_samples))
+                    segment_boundaries = []
+                    for i in range(num_segments):
+                        start_time = i * segment_duration
+                        end_time = min((i + 1) * segment_duration, audio_duration)
+                        segment_boundaries.append((start_time, end_time))
                 
-                print(f"Added genre analysis for {len(genre_time_stamps)} time segments")
+                # Analyze genre for each segment
+                genre_predictions_list = []
+                for start_time, end_time in segment_boundaries:
+                    start_sample = int(start_time * sr)
+                    end_sample = int(end_time * sr)
+                    
+                    # Skip very short segments
+                    if end_sample - start_sample < int(0.1 * sr):
+                        continue
+                    
+                    segment_audio = audio[start_sample:end_sample]
+                    
+                    # Save segment to temporary file
+                    temp_path = f"temp_genre_segment.wav"
+                    import soundfile as sf
+                    sf.write(temp_path, segment_audio, sr)
+                    
+                    try:
+                        # Get genre predictions for this segment
+                        genre_info = discogs_analyzer.analyze_genre(temp_path)
+                        if genre_info and genre_info.genres:
+                            # Extract probabilities from genre names (format: "genre---subgenre")
+                            # For now, we'll create a one-hot-like representation
+                            # In practice, you may want to store the actual probabilities
+                            genre_vector = np.zeros(len(discogs_analyzer.genre_labels))
+                            # Simple approach: mark top genres
+                            for genre in genre_info.genres[:3]:  # Top 3 genres
+                                if genre in discogs_analyzer.genre_labels:
+                                    idx = discogs_analyzer.genre_labels.index(genre)
+                                    genre_vector[idx] = 1.0
+                            genre_predictions_list.append(genre_vector)
+                        else:
+                            # No genre detected, use zeros
+                            genre_predictions_list.append(np.zeros(len(discogs_analyzer.genre_labels)))
+                    except Exception as e:
+                        print(f"Error analyzing genre for segment: {e}")
+                        genre_predictions_list.append(np.zeros(len(discogs_analyzer.genre_labels)))
+                    finally:
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+                
+                if genre_predictions_list:
+                    time_features.genre_predictions = np.array(genre_predictions_list)
+                    time_features.genre_labels = discogs_analyzer.genre_labels
+                    print(f"Added genre analysis for {len(genre_predictions_list)} segments")
+                
+                # Store segment boundaries if not already set
+                if time_features.segment_boundaries is None:
+                    time_features.segment_boundaries = segment_boundaries
                 
             except Exception as e:
                 print(f"Error adding genre analysis: {e}")
@@ -1493,16 +1776,21 @@ class TrackSegmenter:
         segments = []
         for i, (time_stamp, cluster_id) in enumerate(zip(time_stamps, cluster_labels)):
             # Calculate segment boundaries
-            if i == 0:
-                start_time = 0.0
+            # Use stored boundaries if available, otherwise estimate
+            if time_based_features.segment_boundaries and i < len(time_based_features.segment_boundaries):
+                start_time, end_time = time_based_features.segment_boundaries[i]
             else:
-                start_time = max(0.0, time_stamp - segment_duration / 2)
-            
-            if i == len(time_stamps) - 1:
-                # For the last segment, we don't know the exact end, so estimate
-                end_time = time_stamp + segment_duration / 2
-            else:
-                end_time = time_stamps[i + 1] if i + 1 < len(time_stamps) else time_stamp + segment_duration
+                # Fallback to old estimation method
+                if i == 0:
+                    start_time = 0.0
+                else:
+                    start_time = max(0.0, time_stamp - segment_duration / 2)
+                
+                if i == len(time_stamps) - 1:
+                    # For the last segment, we don't know the exact end, so estimate
+                    end_time = time_stamp + segment_duration / 2
+                else:
+                    end_time = time_stamps[i + 1] if i + 1 < len(time_stamps) else time_stamp + segment_duration
             
             # Extract features for this segment
             segment_features = {}
@@ -1626,13 +1914,14 @@ class ComprehensiveAnalyzer:
         print("Extracting time-based features...")
         if self.discogs_analyzer:
             time_based_features = self.time_analyzer.extract_time_features_with_genre(
-                audio_path, discogs_analyzer=self.discogs_analyzer
+                audio_path, discogs_analyzer=self.discogs_analyzer, madmom_features=madmom_features
             )
         else:
-            time_based_features = self.time_analyzer.extract_time_features(audio_path)
+            time_based_features = self.time_analyzer.extract_time_features(audio_path, madmom_features=madmom_features)
         
         # Perform track segmentation if enabled
         segmentation_result = None
+        grouped_segmentation = None
         if enable_segmentation:
             print(f"Performing track segmentation using {segmentation_method}...")
             try:
@@ -1646,13 +1935,23 @@ class ComprehensiveAnalyzer:
                 
                 # Perform segmentation
                 segmentation_result = self.segmenter.segment_track(time_based_features)
-                print(f"Segmented track into {segmentation_result.num_clusters} clusters")
+                print(f"Segmented track into {segmentation_result.num_clusters} clusters with {len(segmentation_result.segments)} segments")
                 if segmentation_result.silhouette_score is not None:
                     print(f"Silhouette score: {segmentation_result.silhouette_score:.3f}")
+                
+                # Group similar consecutive segments
+                print("Grouping similar consecutive segments...")
+                grouped_segmentation = group_similar_segments(
+                    segmentation_result.segments,
+                    segmentation_result.feature_names,
+                    similarity_threshold=0.15
+                )
+                print(f"Grouped {len(segmentation_result.segments)} segments into {grouped_segmentation.num_groups} groups")
                     
             except Exception as e:
                 print(f"Error in track segmentation: {e}")
                 segmentation_result = None
+                grouped_segmentation = None
         
         # Create comprehensive result
         result = ComprehensiveAnalysisResult(
@@ -1662,7 +1961,8 @@ class ComprehensiveAnalyzer:
             discogs_info=discogs_info,
             time_based_features=time_based_features,
             original_analysis=original_analysis,
-            segmentation_result=segmentation_result
+            segmentation_result=segmentation_result,
+            grouped_segmentation=grouped_segmentation
         )
         
         # Save results and create visualizations if output directory is provided

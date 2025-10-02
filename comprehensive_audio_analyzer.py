@@ -96,7 +96,14 @@ Examples:
     parser.add_argument(
         "--enable-segmentation", "-es",
         action="store_true",
-        help="Enable track segmentation based on feature similarity"
+        default=True,
+        help="Enable track segmentation based on feature similarity (default: True)"
+    )
+    
+    parser.add_argument(
+        "--disable-segmentation",
+        action="store_true",
+        help="Disable track segmentation"
     )
     
     parser.add_argument(
@@ -182,6 +189,9 @@ Examples:
     # Determine if Madmom should be enabled
     enable_madmom = args.enable_madmom and not args.disable_madmom
     
+    # Determine if segmentation should be enabled
+    enable_segmentation = args.enable_segmentation and not args.disable_segmentation
+    
     # Perform comprehensive analysis
     print("\n=== Running Comprehensive Analysis ===")
     try:
@@ -191,7 +201,7 @@ Examples:
             original_analysis=original_analysis,
             discogs_model_path=args.discogs_model,
             enable_madmom=enable_madmom,
-            enable_segmentation=args.enable_segmentation,
+            enable_segmentation=enable_segmentation,
             segmentation_method=args.segmentation_method,
             n_clusters=args.num_clusters,
             genre_type=args.genre_type
@@ -255,6 +265,7 @@ Examples:
         print("\n--- Track Segmentation ---")
         seg_result = comprehensive_result.segmentation_result
         print(f"Clustering method: {seg_result.clustering_method}")
+        print(f"Number of segments: {len(seg_result.segments)}")
         print(f"Number of clusters: {seg_result.num_clusters}")
         
         if seg_result.silhouette_score is not None:
@@ -289,6 +300,31 @@ Examples:
             if info['genres']:
                 top_genre = max(info['genres'].items(), key=lambda x: x[1])
                 print(f"    Dominant genre: {top_genre[0]} ({top_genre[1]} segments)")
+    
+    # Print grouped segmentation results if available
+    if comprehensive_result.grouped_segmentation:
+        print("\n--- Segment Grouping ---")
+        grouped = comprehensive_result.grouped_segmentation
+        print(f"Segments grouped into {grouped.num_groups} groups based on feature similarity")
+        
+        for group in grouped.segment_groups:
+            duration = group.end_time - group.start_time
+            print(f"\n  Group {group.group_id}: {group.start_time:.1f}s - {group.end_time:.1f}s ({duration:.1f}s)")
+            print(f"    Contains {len(group.segment_ids)} segments: {group.segment_ids[:10]}{'...' if len(group.segment_ids) > 10 else ''}")
+            
+            # Show averaged features
+            energy = group.avg_features.get('energy', 0)
+            danceability = group.avg_features.get('danceability', 0)
+            valence = group.avg_features.get('valence', 0)
+            print(f"    Avg features - Energy: {energy:.2f}, Danceability: {danceability:.2f}, Valence: {valence:.2f}")
+            
+            if group.dominant_genre:
+                genre_display = group.dominant_genre.split('---')[1] if '---' in group.dominant_genre else group.dominant_genre
+                print(f"    Dominant genre: {genre_display}", end='')
+                if group.genre_confidence:
+                    print(f" (confidence: {group.genre_confidence:.1%})")
+                else:
+                    print()
     
     print(f"\nResults saved to: {output_path}")
     print(f"  - Comprehensive analysis: {output_path / (input_path.stem + '_comprehensive_analysis.json')}")

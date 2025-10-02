@@ -1587,6 +1587,7 @@ class HeatmapVisualizer:
     
     def create_beat_downbeat_visualization(self, audio_path: PathLike,
                                           madmom_features: MadmomFeatures,
+                                          grouped_segmentation: Optional[GroupedSegmentationResult] = None,
                                           output_path: Optional[PathLike] = None,
                                           output_format: str = 'png') -> plt.Figure:
         """Create a wide visualization of waveform with beats and downbeats marked"""
@@ -1611,8 +1612,9 @@ class HeatmapVisualizer:
         additional_width = max(0, (duration - 60) / 60 * 10)
         figure_width = min(100, base_width + additional_width)  # Cap at 100 to prevent extremely wide figures
         
-        # Create a very wide figure
-        fig, ax = plt.subplots(figsize=(figure_width, 6))
+        # Create a figure with two subplots - one for waveform, one for segments
+        fig, (ax_waveform, ax_segments) = plt.subplots(2, 1, figsize=(figure_width, 8),
+                                                       gridspec_kw={'height_ratios': [3, 1]})
         
         # Downsample the waveform for visualization if it's too long
         # Use more points for longer tracks to maintain detail
@@ -1627,35 +1629,116 @@ class HeatmapVisualizer:
             time_axis_downsampled = time_axis
         
         # Plot waveform
-        ax.plot(time_axis_downsampled, audio_downsampled, color='gray', alpha=0.7, linewidth=0.5)
+        ax_waveform.plot(time_axis_downsampled, audio_downsampled, color='gray', alpha=0.7, linewidth=0.5)
         
         # Plot Madmom beats
         if len(madmom_features.beats) > 0:
-            ax.vlines(madmom_features.beats, min(audio_downsampled), max(audio_downsampled),
+            ax_waveform.vlines(madmom_features.beats, min(audio_downsampled), max(audio_downsampled),
                      color='orange', alpha=0.6, linestyle=':', linewidth=1,
                      label=f'Madmom Beats ({len(madmom_features.beats)})')
         
         # Plot Madmom downbeats
         if len(madmom_features.downbeats) > 0:
-            ax.vlines(madmom_features.downbeats, min(audio_downsampled), max(audio_downsampled),
+            ax_waveform.vlines(madmom_features.downbeats, min(audio_downsampled), max(audio_downsampled),
                      color='blue', alpha=0.9, linestyle='-', linewidth=2,
                      label=f'Downbeats ({len(madmom_features.downbeats)})')
         
-        # Formatting
-        ax.set_xlabel('Time (seconds)')
-        ax.set_ylabel('Amplitude')
-        ax.set_title(f'Waveform with Beat and Downbeat Analysis - {audio_path.name}')
-        ax.legend(loc='upper right')
-        ax.grid(True, alpha=0.3)
-        ax.set_xlim(0, duration)
+        # Formatting for waveform subplot
+        ax_waveform.set_ylabel('Amplitude')
+        ax_waveform.set_title(f'Waveform with Beat and Downbeat Analysis - {audio_path.name}')
+        ax_waveform.legend(loc='upper right')
+        ax_waveform.grid(True, alpha=0.3)
+        ax_waveform.set_xlim(0, duration)
+        
+        # Plot segment groups if available
+        if grouped_segmentation is not None and len(grouped_segmentation.segment_groups) > 0:
+            # Create a colormap for the clusters
+            # First, determine the unique cluster IDs from all original segments
+            all_cluster_ids = set()
+            for segment in grouped_segmentation.original_segments:
+                all_cluster_ids.add(segment.cluster_id)
+            
+            # Create a colormap for the clusters
+            num_clusters = len(all_cluster_ids)
+            if num_clusters > 0:
+                # Create a colormap with enough distinct colors
+                if num_clusters <= 10:
+                    colors = plt.cm.tab10(np.linspace(0, 1, num_clusters))
+                else:
+                    # Use more colors if needed
+                    colors = plt.cm.rainbow(np.linspace(0, 1, num_clusters))
+                
+                # Create a mapping from cluster_id to color
+                cluster_colors = {}
+                for i, cluster_id in enumerate(sorted(all_cluster_ids)):
+                    cluster_colors[cluster_id] = colors[i % len(colors)]
+                
+                # Plot each segment group with the color of its dominant cluster
+                for group in grouped_segmentation.segment_groups:
+                    # Determine the dominant cluster in this group
+                    # Get all segments in this group
+                    group_segments = [seg for seg in grouped_segmentation.original_segments
+                                     if seg.segment_id in group.segment_ids]
+                    
+                    if group_segments:
+                        # Find the most common cluster in this group
+                        cluster_counts = {}
+                        for seg in group_segments:
+                            cluster_id = seg.cluster_id
+                            if cluster_id not in cluster_counts:
+                                cluster_counts[cluster_id] = 0
+                            cluster_counts[cluster_id] += 1
+                        
+                        # Get the dominant cluster
+                        dominant_cluster = max(cluster_counts.items(), key=lambda x: x[1])[0]
+                        
+                        # Get the color for this cluster
+                        color = cluster_colors[dominant_cluster]
+                        
+                        # Plot the segment group as a horizontal bar
+                        ax_segments.barh(0, group.end_time - group.start_time,
+                                       left=group.start_time, height=0.8,
+                                       color=color, alpha=0.7,
+                                       label=f'Cluster {dominant_cluster}' if group.group_id == 0 else "")
+                
+                # Add a legend for the clusters
+                handles = []
+                for cluster_id in sorted(all_cluster_ids):
+                    color = cluster_colors[cluster_id]
+                    handles.append(plt.Rectangle((0,0), 1, 1, color=color, alpha=0.7,
+                                               label=f'Cluster {cluster_id}'))
+                
+                ax_segments.legend(handles=handles, loc='upper right', ncol=min(5, len(handles)))
+                
+                # Add segment group information as text
+                for i, group in enumerate(grouped_segmentation.segment_groups):
+                    if group.dominant_genre:
+                        # Position the text in the middle of the segment
+                        text_x = (group.start_time + group.end_time) / 2
+                        # Only show text if segment is wide enough
+                        if group.end_time - group.start_time > duration * 0.02:  # At least 2% of track duration
+                            ax_segments.text(text_x, 0.4, group.dominant_genre[:10] + '...' if len(group.dominant_genre) > 10 else group.dominant_genre,
+                                          ha='center', va='center', fontsize=8, color='white', weight='bold')
+        
+        # Formatting for segments subplot
+        ax_segments.set_xlabel('Time (seconds)')
+        ax_segments.set_ylabel('Segments')
+        ax_segments.set_title('Segment Groups (colored by cluster)')
+        ax_segments.set_ylim(-0.5, 1.5)
+        ax_segments.set_yticks([])
+        ax_segments.set_xlim(0, duration)
+        ax_segments.grid(True, alpha=0.3)
         
         # Format x-axis to show time in minutes:seconds for better readability
         # Add more time ticks for longer tracks
         num_ticks = min(40, max(10, int(duration/10) + 1))
         time_ticks = np.linspace(0, duration, num_ticks)
         time_labels = [f"{int(t/60):.0f}:{int(t%60):.0f}" for t in time_ticks]
-        ax.set_xticks(time_ticks)
-        ax.set_xticklabels(time_labels, rotation=45)
+        
+        # Set the same x-axis ticks for both subplots
+        for ax in [ax_waveform, ax_segments]:
+            ax.set_xticks(time_ticks)
+            ax.set_xticklabels(time_labels, rotation=45)
         
         plt.tight_layout()
         
@@ -2148,7 +2231,7 @@ class ComprehensiveAnalyzer:
         if result.madmom_features is not None:
             beat_downbeat_path = output_dir / f"{result.path.stem}_beats_downbeats.png"
             self.visualizer.create_beat_downbeat_visualization(
-                result.path, result.madmom_features, beat_downbeat_path, output_format='png'
+                result.path, result.madmom_features, result.grouped_segmentation, beat_downbeat_path, output_format='png'
             )
         
         print(f"Visualizations saved to {output_dir}")

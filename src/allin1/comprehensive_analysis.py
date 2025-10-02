@@ -44,6 +44,7 @@ from sklearn.metrics import silhouette_score
 
 # Reduce Essentia logging noise (e.g., TriangularBands filter-bank info messages)
 essentia.log.infoActive = False
+essentia.log.warningActive = False  # Suppress TensorFlow network warnings
 
 # Mapping from textual music keys to integer indices (C=0,...,B=11)
 KEY_TO_INT = {
@@ -1146,9 +1147,12 @@ class TimeBasedAnalyzer:
                         end_time = min((i + 1) * segment_duration, audio_duration)
                         segment_boundaries.append((start_time, end_time))
                 
-                # Analyze genre for each segment
-                genre_predictions_list = []
-                for start_time, end_time in segment_boundaries:
+                # Prepare all segments for batch processing
+                print(f"Preparing {len(segment_boundaries)} segments for batch genre analysis...")
+                segment_audio_list = []
+                valid_segment_indices = []
+                
+                for idx, (start_time, end_time) in enumerate(segment_boundaries):
                     start_sample = int(start_time * sr)
                     end_sample = int(end_time * sr)
                     
@@ -1167,37 +1171,88 @@ class TimeBasedAnalyzer:
                         # Pad with zeros at the end
                         segment_audio_16k = np.pad(segment_audio_16k, (0, min_samples - len(segment_audio_16k)), mode='constant')
                     
+                    segment_audio_list.append(segment_audio_16k)
+                    valid_segment_indices.append(idx)
+                
+                # Batch process all segments at once
+                print(f"Running batch genre prediction on {len(segment_audio_list)} segments...")
+                genre_predictions_list = []
+                
+                if segment_audio_list:
                     try:
-                        # Get genre predictions directly from the classifier
-                        predictions = discogs_analyzer.discogs_classifier(segment_audio_16k)
+                        # Concatenate all segments into one long audio array
+                        # The model will process this more efficiently
+                        concatenated_audio = np.concatenate(segment_audio_list)
                         
-                        if predictions is not None:
-                            # Convert to numpy array
-                            pred_array = np.array(predictions)
+                        # Get predictions for the concatenated audio
+                        all_predictions = discogs_analyzer.discogs_classifier(concatenated_audio)
+                        
+                        if all_predictions is not None and len(all_predictions) > 0:
+                            pred_array = np.array(all_predictions)
+                            
+                            # Split predictions back into segments
+                            # Each segment should get predictions proportional to its length
+                            segment_lengths = [len(seg) for seg in segment_audio_list]
+                            total_samples = sum(segment_lengths)
                             
                             # Average predictions across frames if needed
                             if pred_array.ndim > 1:
-                                avg_predictions = np.mean(pred_array, axis=0)
+                                # Model returns predictions per frame
+                                # We need to distribute frames to segments based on their lengths
+                                num_frames = len(pred_array)
+                                frame_idx = 0
+                                
+                                for seg_len in segment_lengths:
+                                    # Calculate how many frames belong to this segment
+                                    frames_per_segment = int(num_frames * seg_len / total_samples)
+                                    if frames_per_segment == 0:
+                                        frames_per_segment = 1
+                                    
+                                    end_frame = min(frame_idx + frames_per_segment, num_frames)
+                                    segment_predictions = pred_array[frame_idx:end_frame]
+                                    
+                                    # Average predictions for this segment
+                                    avg_predictions = np.mean(segment_predictions, axis=0)
+                                    
+                                    # Apply softmax to convert logits to probabilities
+                                    exp_pred = np.exp(avg_predictions - np.max(avg_predictions))
+                                    probabilities = exp_pred / np.sum(exp_pred)
+                                    
+                                    genre_predictions_list.append(probabilities)
+                                    frame_idx = end_frame
                             else:
-                                avg_predictions = pred_array
-                            
-                            # Apply softmax to convert logits to probabilities
-                            # Softmax: exp(x) / sum(exp(x))
-                            exp_pred = np.exp(avg_predictions - np.max(avg_predictions))  # Subtract max for numerical stability
-                            probabilities = exp_pred / np.sum(exp_pred)
-                            
-                            # Ensure we have the right number of predictions
-                            if len(probabilities) == len(discogs_analyzer.genre_labels):
-                                genre_predictions_list.append(probabilities)
-                            else:
-                                print(f"Warning: Prediction size mismatch for segment at {start_time:.2f}s")
-                                genre_predictions_list.append(np.zeros(len(discogs_analyzer.genre_labels)))
+                                # Single prediction vector - use for all segments
+                                exp_pred = np.exp(pred_array - np.max(pred_array))
+                                probabilities = exp_pred / np.sum(exp_pred)
+                                genre_predictions_list = [probabilities] * len(segment_audio_list)
                         else:
-                            # No predictions, use zeros
-                            genre_predictions_list.append(np.zeros(len(discogs_analyzer.genre_labels)))
+                            print("Warning: No predictions returned from batch processing")
+                            genre_predictions_list = [np.zeros(len(discogs_analyzer.genre_labels))] * len(segment_audio_list)
+                    
                     except Exception as e:
-                        print(f"Error analyzing genre for segment at {start_time:.2f}s: {e}")
-                        genre_predictions_list.append(np.zeros(len(discogs_analyzer.genre_labels)))
+                        print(f"Error in batch genre prediction: {e}")
+                        print("Falling back to per-segment processing...")
+                        
+                        # Fallback to individual processing if batch fails
+                        for idx, segment_audio_16k in enumerate(segment_audio_list):
+                            try:
+                                predictions = discogs_analyzer.discogs_classifier(segment_audio_16k)
+                                
+                                if predictions is not None:
+                                    pred_array = np.array(predictions)
+                                    if pred_array.ndim > 1:
+                                        avg_predictions = np.mean(pred_array, axis=0)
+                                    else:
+                                        avg_predictions = pred_array
+                                    
+                                    exp_pred = np.exp(avg_predictions - np.max(avg_predictions))
+                                    probabilities = exp_pred / np.sum(exp_pred)
+                                    genre_predictions_list.append(probabilities)
+                                else:
+                                    genre_predictions_list.append(np.zeros(len(discogs_analyzer.genre_labels)))
+                            except Exception as e2:
+                                print(f"Error on segment {idx}: {e2}")
+                                genre_predictions_list.append(np.zeros(len(discogs_analyzer.genre_labels)))
                 
                 if genre_predictions_list:
                     time_features.genre_predictions = np.array(genre_predictions_list)

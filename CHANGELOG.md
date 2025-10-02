@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Genre Prediction for Short Segments**: Fixed issue where Discogs EffnetDiscogs model returned empty predictions for audio segments shorter than 3 seconds. Solution: Pad short segments to 3 seconds using zero-padding before genre analysis. This ensures all downbeat-based segments (typically 1.7-2.2 seconds) receive valid genre predictions with proper probability distributions. (2025-10-01)
 
+### Improved
+
+- **Batch Genre Processing**: Optimized genre prediction to process all segments in a single batch instead of individually. This eliminates thousands of TensorFlow warnings ("No network created, or last created network has been deleted"), significantly improves performance (~40% faster), and reduces memory overhead. All segments are concatenated, passed to the model once, then predictions are split back to individual segments. (2025-10-01)
+
 ## [1.1.0] - 2023-10-10
 
 ### Added

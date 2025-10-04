@@ -1,12 +1,14 @@
 # Beat Detection Comparison: Madmom vs beat_this
 
 This document describes the beat detection comparison functionality that compares two libraries:
+
 - **Madmom**: Established beat tracking library using RNN-based models
 - **beat_this**: Newer beat tracking library from CPJKU
 
 ## Installation
 
 ### Installing Madmom
+
 ```bash
 pip install madmom
 ```
@@ -18,11 +20,13 @@ beat_this has several dependencies that must be installed first:
 1. **Install PyTorch 2.0 or later** (follow instructions for your platform at https://pytorch.org/)
 
 2. **Install required packages:**
+
 ```bash
 pip install tqdm einops soxr rotary-embedding-torch
 ```
 
 3. **Install ffmpeg** (for audio format support beyond .wav):
+
 ```bash
 # Using conda
 conda install ffmpeg
@@ -35,6 +39,7 @@ brew install ffmpeg
 ```
 
 4. **Install beat_this:**
+
 ```bash
 pip install https://github.com/CPJKU/beat_this/archive/main.zip
 ```
@@ -44,6 +49,7 @@ pip install https://github.com/CPJKU/beat_this/archive/main.zip
 ### Running the Comparison Test
 
 The `test_beat_comparison.py` script compares both methods and outputs:
+
 - **Execution time** for each method
 - **Number of beats and downbeats** detected
 - **Tempo estimation** (BPM)
@@ -51,17 +57,20 @@ The `test_beat_comparison.py` script compares both methods and outputs:
 - **Accuracy metrics** (if ground truth is provided)
 
 #### Basic Usage (No Ground Truth)
+
 ```bash
 python test_beat_comparison.py path/to/audio.wav
 ```
 
 This will:
+
 - Run both Madmom and beat_this on the audio file
 - Measure execution time for each method
 - Output beat and downbeat detections
 - Save results to `beat_comparison_results.json`
 
 #### With Ground Truth (For Accuracy Evaluation)
+
 ```bash
 python test_beat_comparison.py path/to/audio.wav \
   --ground-truth-beats beats.txt \
@@ -72,11 +81,13 @@ python test_beat_comparison.py path/to/audio.wav \
 Ground truth files should be text files with one timestamp per line (in seconds).
 
 #### Custom Output Path
+
 ```bash
 python test_beat_comparison.py path/to/audio.wav -o my_results.json
 ```
 
 #### Adjusting Beat Matching Tolerance
+
 ```bash
 python test_beat_comparison.py path/to/audio.wav --tolerance 0.05
 ```
@@ -187,6 +198,7 @@ print(f"Consistency: {features.beat_consistency:.3f}")
 ### Madmom Implementation
 
 Madmom uses:
+
 - **RNNBeatProcessor**: Recurrent Neural Network for beat activation detection
 - **BeatTrackingProcessor**: Dynamic Bayesian Network for beat tracking
 - **RNNDownBeatProcessor**: RNN for downbeat activation
@@ -195,6 +207,7 @@ Madmom uses:
 ### beat_this Implementation
 
 beat_this uses:
+
 - **BeatTracker**: State-of-the-art deep learning model for beat and downbeat tracking
 - Processes audio at 22050 Hz sample rate
 - Returns beat and downbeat timestamps directly
@@ -202,12 +215,14 @@ beat_this uses:
 ### Tempo Calculation
 
 Both implementations calculate tempo from beat intervals using:
+
 1. Median interval for robustness
 2. Convert to BPM: `tempo = 60.0 / median_interval`
 
 ### Beat Consistency
 
 Measures the regularity of beat intervals:
+
 ```python
 beat_consistency = 1.0 - (std(intervals) / median(intervals))
 ```
@@ -219,12 +234,14 @@ Values range from 0 to 1, where 1 indicates perfectly regular beats.
 Based on testing, typical characteristics:
 
 ### Madmom
+
 - **Pros**: Very accurate, well-tested, handles complex music
 - **Cons**: Slower execution, requires more dependencies
 - **Typical F1-Score**: 0.90-0.95 on well-recorded music
 - **Typical Time**: 2-5 seconds for a 3-minute song
 
 ### beat_this
+
 - **Pros**: Faster execution, modern architecture
 - **Cons**: May be less accurate on very complex music
 - **Typical F1-Score**: 0.88-0.94 on well-recorded music
@@ -233,6 +250,7 @@ Based on testing, typical characteristics:
 ## Troubleshooting
 
 ### beat_this not found
+
 If you get an import error for beat_this, make sure all dependencies are installed:
 
 ```bash
@@ -259,7 +277,9 @@ brew install ffmpeg
 **Note:** If you see errors about missing `torch`, make sure you have PyTorch 2.0+ installed first from https://pytorch.org/
 
 ### Madmom installation issues
+
 On some systems, Madmom may require additional dependencies:
+
 ```bash
 # macOS
 brew install libsndfile
@@ -272,7 +292,9 @@ pip install madmom
 ```
 
 ### Different beat counts
+
 It's normal for the two methods to detect slightly different numbers of beats, especially:
+
 - At the beginning/end of the track
 - During tempo changes
 - In complex rhythmic passages

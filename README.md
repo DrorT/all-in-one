@@ -523,6 +523,7 @@ python test_beat_comparison.py path/to/audio.wav \
 ### Output Metrics
 
 The comparison script measures:
+
 - **Execution Time**: Processing speed for each method
 - **Beat Count**: Number of beats and downbeats detected
 - **Tempo**: BPM estimation

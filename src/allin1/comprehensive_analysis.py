@@ -36,6 +36,16 @@ except ImportError:
     MADMOM_AVAILABLE = False
     print("Madmom not available. Install with: pip install madmom")
 
+# beat_this for beat and downbeat tracking (alternative to Madmom)
+try:
+    from beat_this.inference import File2Beats
+    BEAT_THIS_AVAILABLE = True
+except ImportError:
+    BEAT_THIS_AVAILABLE = False
+    print("beat_this not available. Requires PyTorch 2.0+, then:")
+    print("  pip install tqdm einops soxr rotary-embedding-torch")
+    print("  pip install https://github.com/CPJKU/beat_this/archive/main.zip")
+
 # Clustering and segmentation
 from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
@@ -93,6 +103,16 @@ def _to_serializable(value: Any) -> Any:
 @dataclass
 class MadmomFeatures:
     """Data class for Madmom extracted features"""
+    beats: np.ndarray
+    downbeats: np.ndarray
+    tempo: float
+    beat_consistency: float
+    beat_intervals: np.ndarray
+
+
+@dataclass
+class BeatThisFeatures:
+    """Data class for beat_this extracted features"""
     beats: np.ndarray
     downbeats: np.ndarray
     tempo: float
@@ -310,6 +330,7 @@ class ComprehensiveAnalysisResult:
     path: Path
     essentia_features: EssentiaFeatures
     madmom_features: Optional[MadmomFeatures]
+    beat_this_features: Optional[BeatThisFeatures]
     discogs_info: Optional[DiscogsInfo]
     time_based_features: TimeBasedFeatures
     original_analysis: Optional[AnalysisResult] = None
@@ -635,6 +656,69 @@ class MadmomAnalyzer:
             
         except Exception as e:
             print(f"Error in Madmom beat and downbeat extraction: {e}")
+            return None
+
+
+class BeatThisAnalyzer:
+    """Class for extracting beats and downbeats using beat_this"""
+    
+    def __init__(self, device='cpu'):
+        if not BEAT_THIS_AVAILABLE:
+            raise ImportError("beat_this is not available. Install with: pip install beat-this")
+        # File2Beats is the high-level API that handles everything
+        # It will download the checkpoint automatically on first use
+        self.tracker = File2Beats(checkpoint_path='final0', device=device, dbn=True)
+    
+    def extract_beats_and_downbeats(self, audio_path: PathLike) -> Optional[BeatThisFeatures]:
+        """Extract beats and downbeats using beat_this"""
+        audio_path = mkpath(audio_path)
+        
+        try:
+            # File2Beats returns beats and downbeats as numpy arrays
+            # Format: (beats, downbeats) where each is a 1D array of timestamps in seconds
+            result = self.tracker(str(audio_path))
+            
+            # Result is a tuple: (beats, downbeats)
+            if isinstance(result, tuple) and len(result) >= 2:
+                beat_times = np.array(result[0])
+                downbeat_times = np.array(result[1])
+            else:
+                # Fallback if format is different
+                print(f"Unexpected result format from beat_this: {type(result)}")
+                return None
+            
+            # Calculate tempo from beat times
+            if len(beat_times) > 1:
+                # Calculate beat intervals
+                beat_intervals = np.diff(beat_times)
+                
+                # Use median for robustness
+                median_interval = np.median(beat_intervals)
+                tempo_value = 60.0 / median_interval if median_interval > 0 else 0.0
+                
+                # Calculate beat consistency (coefficient of variation)
+                if median_interval > 0:
+                    beat_consistency = 1.0 - (np.std(beat_intervals) / median_interval)
+                    beat_consistency = max(0.0, min(1.0, beat_consistency))
+                else:
+                    beat_consistency = 0.0
+            else:
+                beat_intervals = np.array([])
+                tempo_value = 0.0
+                beat_consistency = 0.0
+            
+            return BeatThisFeatures(
+                beats=beat_times,
+                downbeats=downbeat_times,
+                tempo=tempo_value,
+                beat_consistency=beat_consistency,
+                beat_intervals=beat_intervals
+            )
+            
+        except Exception as e:
+            print(f"Error in beat_this beat and downbeat extraction: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
 

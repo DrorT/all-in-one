@@ -26,6 +26,7 @@ This package provides models for music structure analysis, predicting:
 - [Speed](#speed)
 - [Advanced Usage for Research](#advanced-usage-for-research)
 - [Concerning MP3 Files](#concerning-mp3-files)
+- [Beat Detection Comparison](#beat-detection-comparison)
 - [Training](TRAINING.md)
 - [Citation](#citation)
 
@@ -477,6 +478,79 @@ I've observed variations of about 20~40ms, which is problematic for tasks requir
 where the conventional tolerance is just 70ms.
 Hence, I advise standardizing inputs to the WAV format for all data processing,
 ensuring straightforward decoding.
+
+## Beat Detection Comparison
+
+This package now includes support for comparing two beat detection libraries: **Madmom** (default) and **beat_this** (newer alternative from CPJKU).
+
+### Installation
+
+```bash
+# Install Madmom (default)
+pip install madmom
+
+# Install beat_this (alternative - requires PyTorch 2.0+)
+pip install tqdm einops soxr rotary-embedding-torch
+pip install https://github.com/CPJKU/beat_this/archive/main.zip
+
+# Also install ffmpeg for audio format support:
+# conda install ffmpeg  # or: sudo apt-get install ffmpeg
+```
+
+### Quick Comparison Test
+
+```bash
+# Check which libraries are available
+python example_beat_comparison.py
+
+# Quick test on an audio file
+python example_beat_comparison.py path/to/audio.wav
+
+# Full comparison with metrics and JSON output
+python test_beat_comparison.py path/to/audio.wav -o results.json
+```
+
+### With Ground Truth for Accuracy Evaluation
+
+```bash
+python test_beat_comparison.py path/to/audio.wav \
+  --ground-truth-beats beats.txt \
+  --ground-truth-downbeats downbeats.txt \
+  --ground-truth-tempo 120.0 \
+  -o comparison_results.json
+```
+
+### Output Metrics
+
+The comparison script measures:
+- **Execution Time**: Processing speed for each method
+- **Beat Count**: Number of beats and downbeats detected
+- **Tempo**: BPM estimation
+- **Beat Consistency**: Regularity score (0-1)
+- **Accuracy** (if ground truth provided):
+  - Precision: How many predicted beats are correct
+  - Recall: How many true beats were detected
+  - F1-Score: Harmonic mean of precision and recall
+
+### Python API
+
+```python
+from allin1.comprehensive_analysis import MadmomAnalyzer, BeatThisAnalyzer
+
+# Using Madmom (default)
+madmom = MadmomAnalyzer()
+features = madmom.extract_beats_and_downbeats('audio.wav')
+print(f"Tempo: {features.tempo:.2f} BPM")
+print(f"Beats: {len(features.beats)}")
+
+# Using beat_this (alternative)
+beat_this = BeatThisAnalyzer()
+features = beat_this.extract_beats_and_downbeats('audio.wav')
+print(f"Tempo: {features.tempo:.2f} BPM")
+print(f"Beats: {len(features.beats)}")
+```
+
+For detailed documentation, see [BEAT_COMPARISON_GUIDE.md](BEAT_COMPARISON_GUIDE.md).
 
 ## Training
 
